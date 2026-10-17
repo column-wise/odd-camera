@@ -121,7 +121,7 @@ fun CameraScreen(
                     }
                     Control(if (timerSeconds == 0) "타이머 끔" else "타이머 ${timerSeconds}초") { vm.cycleTimer() }
                     Control("조정", selected = panelOpen) { panelOpen = !panelOpen }
-                    Control("전환") { vm.torch.value = false; camera.switchLens() }
+                    Control("전환") { vm.cancelCountdown(); vm.torch.value = false; camera.switchLens() }
                 }
                 Spacer(Modifier.weight(1f))
                 if (panelOpen) ParamPanel(vm, filter, vm.values[index])
@@ -143,8 +143,8 @@ fun CameraScreen(
                             .clickable { vm.shutter(onCapturePhoto, onToggleRecording) },
                     )
                     Column {
-                        Control("사진", selected = mode == CaptureMode.PHOTO) { vm.mode.value = CaptureMode.PHOTO }
-                        Control("동영상", selected = mode == CaptureMode.VIDEO) { vm.mode.value = CaptureMode.VIDEO }
+                        Control("사진", selected = mode == CaptureMode.PHOTO) { vm.setMode(CaptureMode.PHOTO) }
+                        Control("동영상", selected = mode == CaptureMode.VIDEO) { vm.setMode(CaptureMode.VIDEO) }
                     }
                 }
             }

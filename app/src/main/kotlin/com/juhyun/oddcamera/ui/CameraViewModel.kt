@@ -12,7 +12,10 @@ import com.juhyun.oddcamera.camera.FlashMode
 import com.juhyun.oddcamera.filter.FilterRegistry
 import com.juhyun.oddcamera.filter.ParamStore
 import com.juhyun.oddcamera.filter.ParamValues
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -41,6 +44,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     val lastCapture = MutableStateFlow<Uri?>(null)
 
     private val saveJobs = arrayOfNulls<Job>(filters.size)
+    /** Filters with an edit not yet written; flushed in onCleared. Main thread only. */
+    private val dirty = HashSet<Int>()
     private var timer: CountdownTimer? = null
 
     init {
@@ -55,11 +60,34 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         val i = filterIndex.value
         values[i].set(key, value)
         revision.value++
+        dirty += i
         saveJobs[i]?.cancel()
         saveJobs[i] = viewModelScope.launch {
             delay(300)
             store.save(filters[i].id, values[i])
+            dirty -= i // after the write: a save cancelled mid-way stays dirty for onCleared
         }
+    }
+
+    override fun onCleared() {
+        // viewModelScope is already cancelled: write pending edits on a scope that outlives the VM.
+        val pending = dirty.map { filters[it].id to values[it].snapshot() }
+        dirty.clear()
+        if (pending.isNotEmpty()) CoroutineScope(Dispatchers.IO + NonCancellable).launch {
+            pending.forEach { (id, v) -> store.save(id, v) }
+        }
+    }
+
+    fun setMode(m: CaptureMode) {
+        cancelCountdown()
+        mode.value = m
+    }
+
+    /** Stops a running photo countdown (mode/lens change must never let it capture later). */
+    fun cancelCountdown() {
+        timer?.cancel()
+        timer = null
+        countdown.value = 0
     }
 
     /** Swipe: +1 next, -1 previous, wrapping around. */
@@ -78,12 +106,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     /** Photo: run (or cancel a running) countdown, then capture. Video: start/stop recording. */
     fun shutter(onCapturePhoto: () -> Unit, onToggleRecording: () -> Unit) {
         if (mode.value == CaptureMode.VIDEO) return onToggleRecording()
-        timer?.let {
-            it.cancel()
-            timer = null
-            countdown.value = 0
-            return
-        }
+        if (timer != null) return cancelCountdown()
         val t = CountdownTimer(timerSeconds.value, { countdown.value = it }, {
             timer = null
             countdown.value = 0
