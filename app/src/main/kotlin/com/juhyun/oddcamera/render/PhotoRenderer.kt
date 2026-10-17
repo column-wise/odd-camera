@@ -17,6 +17,7 @@ import java.nio.ByteOrder
 class PhotoRenderer {
     private val prep = GlProgram(GlUtil.QUAD_VS, PREP_FS)
     private val flip = GlProgram(GlUtil.QUAD_VS, FLIP_FS)
+    private val reader = AnalysisReader()
     private val maxSize = IntArray(1).also { GLES30.glGetIntegerv(GLES30.GL_MAX_TEXTURE_SIZE, it, 0) }[0]
 
     /**
@@ -49,7 +50,9 @@ class PhotoRenderer {
             GlUtil.drawQuad(prep)
             GLES30.glDeleteTextures(1, intArrayOf(tex), 0)
 
-            val analysis = (snapshot.analysis as? RotatableAnalysis)?.rotated(rot) ?: snapshot.analysis
+            val rotated = (snapshot.analysis as? RotatableAnalysis)?.rotated(rot) ?: snapshot.analysis
+            val still = reader.read(a.tex, w, h, RenderThread.ANALYSIS_WIDTH)
+            val analysis = snapshot.filter.captureAnalysis(still, snapshot.params, rotated)
             FilterPass.render(renderer, a.tex, b.id, w, h, snapshot.params, analysis)
 
             // Flip into `a` so glReadPixels' first row is the image top (Bitmap order).
@@ -73,6 +76,7 @@ class PhotoRenderer {
     fun release() {
         prep.release()
         flip.release()
+        reader.release()
     }
 
     private companion object {

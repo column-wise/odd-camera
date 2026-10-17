@@ -16,6 +16,8 @@ import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import android.util.Size
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
@@ -133,10 +135,12 @@ class CameraController(
             .setTargetRotation(Surface.ROTATION_0)
             .build()
         preview.setSurfaceProvider(renderThread.cameraSurfaceProvider())
-        // Default still size for the aspect (the binned ~12 MP stream, never the max-resolution sensor mode).
+        // ~12 MP still (R14): capped so 50-200 MP sensors never feed the multi-bitmap photo pipeline.
         val capture = if (aspect == Aspect.PHOTO_4_3) ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(strategy).build())
+            .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(strategy)
+                .setResolutionStrategy(ResolutionStrategy(Size(4000, 3000), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                .build())
             .setTargetRotation(Surface.ROTATION_0)
             .build() else null
         // The shared ViewPort keeps preview crop == capture crop.

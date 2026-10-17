@@ -22,6 +22,13 @@ interface Filter {
     val title: String
     val params: List<FilterParam>
     fun analyze(frame: LumaFrame, params: ParamValues, previous: FrameAnalysis?): FrameAnalysis
+    /**
+     * Photo capture: adapt the shutter-moment analysis to the still (whose exposure/tone differs from the preview
+     * stream). `still` is the luma of the still in output orientation; `snapshot` is already rotated to it.
+     * Default: keep the snapshot exactly (e.g. Light Boxes: the boxes on screen at the shutter).
+     */
+    fun captureAnalysis(still: LumaFrame, params: ParamValues, snapshot: FrameAnalysis): FrameAnalysis = snapshot
+
     /** Called on the GL thread; the caller calls init() before the first draw. */
     fun createRenderer(): FilterRenderer
 }

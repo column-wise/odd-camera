@@ -313,12 +313,12 @@ class RenderThread : HandlerThread("RenderThread") {
         return result
     }
 
-    private companion object {
-        const val TAG = "RenderThread"
-        /** Analysis readback width (ruling R7: ≤160). Task 11's governor may lower it. */
+    companion object {
+        private const val TAG = "RenderThread"
+        /** Analysis readback width (ruling R7: ≤160). Task 11's governor may lower it. Photo analysis uses it too. */
         const val ANALYSIS_WIDTH = 160
 
-        const val VS = """#version 300 es
+        private const val VS = """#version 300 es
 in vec2 aPos;
 uniform float uFlipX;
 out vec2 vUv;
@@ -327,7 +327,7 @@ void main() {
     gl_Position = vec4(aPos.x * uFlipX, aPos.y, 0.0, 1.0);
 }"""
 
-        const val OES_FS = """#version 300 es
+        private const val OES_FS = """#version 300 es
 #extension GL_OES_EGL_image_external_essl3 : require
 precision mediump float;
 uniform samplerExternalOES uTex;

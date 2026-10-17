@@ -40,6 +40,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     val timerSeconds = MutableStateFlow(0)
     /** Remaining countdown seconds; 0 = not counting. */
     val countdown = MutableStateFlow(0)
+    /** A photo is being captured/saved; the shutter is disabled meanwhile (set by the activity). */
+    val capturing = MutableStateFlow(false)
     /** Set by Tasks 9/10 after a save. */
     val lastCapture = MutableStateFlow<Uri?>(null)
 
@@ -107,6 +109,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     fun shutter(onCapturePhoto: () -> Unit, onToggleRecording: () -> Unit) {
         if (mode.value == CaptureMode.VIDEO) return onToggleRecording()
         if (timer != null) return cancelCountdown()
+        if (capturing.value) return
         val t = CountdownTimer(timerSeconds.value, { countdown.value = it }, {
             timer = null
             countdown.value = 0

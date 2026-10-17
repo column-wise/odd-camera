@@ -73,6 +73,15 @@ object AsciiFilter : Filter {
         return object : FrameAnalysis { override val threshold = t }
     }
 
+    /**
+     * Same relative threshold on the still's own histogram -> same coverage as the preview despite exposure (R13).
+     * The preview's on/off decision (contrast gate, threshold 256) wins: a still that crosses the gate differently
+     * keeps the snapshot.
+     */
+    override fun captureAnalysis(still: LumaFrame, params: ParamValues, snapshot: FrameAnalysis): FrameAnalysis =
+        if (snapshot.threshold >= 256) snapshot
+        else analyze(still, params, null).takeIf { it.threshold < 256 } ?: snapshot
+
     override fun createRenderer(): FilterRenderer = object : FilterRenderer {
         private lateinit var program: GlProgram
         private var atlas = 0

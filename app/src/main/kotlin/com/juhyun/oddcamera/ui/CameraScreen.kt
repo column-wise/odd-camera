@@ -85,6 +85,7 @@ fun CameraScreen(
     val torch by vm.torch.collectAsState()
     val timerSeconds by vm.timerSeconds.collectAsState()
     val countdown by vm.countdown.collectAsState()
+    val capturing by vm.capturing.collectAsState()
     val zoom by camera.zoomRatio.collectAsState()
     val zoomRange by camera.zoomRange.collectAsState()
     var panelOpen by remember { mutableStateOf(false) }
@@ -138,7 +139,7 @@ fun CameraScreen(
                     LastCaptureThumbnail(vm)
                     Box(
                         Modifier.size(72.dp).clip(CircleShape)
-                            .background(if (mode == CaptureMode.VIDEO) Color(0xFFE53935) else Color.White)
+                            .background(if (mode == CaptureMode.VIDEO) Color(0xFFE53935) else if (capturing) Color.Gray else Color.White)
                             .border(4.dp, Color.Gray, CircleShape)
                             .clickable { vm.shutter(onCapturePhoto, onToggleRecording) },
                     )

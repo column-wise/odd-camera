@@ -109,6 +109,26 @@ class PhotoMatchesPreviewTest {
     @Test fun asciiRotated90() { compare(AsciiFilter, false, 90) }
     @Test fun lightBoxesMirroredRotated270() { compare(LightBoxesFilter, true, 270) }
 
+    /** R13: a still exposed darker than the preview (×0.7) still gets the preview's ASCII coverage. */
+    @Test fun asciiCoverageFollowsTheStillNotTheAbsoluteThreshold() {
+        val r = AsciiFilter.createRenderer().apply { init() }
+        val src = scene()
+        val p = preview(AsciiFilter, r, src, params(AsciiFilter))
+        val darker = Bitmap.createBitmap(src.pixels().map { c ->
+            Color.rgb((Color.red(c) * 0.7f).toInt(), (Color.green(c) * 0.7f).toInt(), (Color.blue(c) * 0.7f).toInt())
+        }.toIntArray(), W, H, Bitmap.Config.ARGB_8888)
+        val shot = photo.render(Bitmap.createScaledBitmap(darker, W * 4, H * 4, false),
+            CaptureSnapshot(AsciiFilter, p.params, p.analysis, false, 0), r)
+        r.release()
+        // Coverage = share of glyph-background pixels (replaced cells).
+        fun coverage(b: Bitmap) = b.pixels().count { c ->
+            Math.abs(Color.red(c) - 0xF4) <= 3 && Math.abs(Color.green(c) - 0xF0) <= 3 && Math.abs(Color.blue(c) - 0xFF) <= 3
+        }.toDouble() / (b.width * b.height)
+        val cp = coverage(p.image); val cs = coverage(shot)
+        assertTrue("preview coverage $cp too small for a meaningful check", cp > 0.1)
+        assertTrue("photo coverage $cs vs preview $cp", Math.abs(cs - cp) < 0.03)
+    }
+
     /**
      * The outlines are too thin to move the MAD much, so check them alone: same analysis over a black source,
      * outline overlap (IoU of the 90 px-wide downscales) between photo and rotated/mirrored preview.
