@@ -6,16 +6,16 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.view.OrientationEventListener
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -24,9 +24,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.layout.Box
 import androidx.core.content.ContextCompat
-import com.juhyun.oddcamera.camera.Aspect
 import com.juhyun.oddcamera.camera.CameraController
 import com.juhyun.oddcamera.render.RenderThread
+import com.juhyun.oddcamera.ui.CameraScreen
+import com.juhyun.oddcamera.ui.CameraViewModel
 import com.juhyun.oddcamera.ui.PermissionGate
 
 class MainActivity : ComponentActivity() {
@@ -34,6 +35,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var camera: CameraController
     private lateinit var orientationListener: OrientationEventListener
     private var granted by mutableStateOf(false)
+    private val vm: CameraViewModel by viewModels()
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
@@ -60,8 +62,11 @@ class MainActivity : ComponentActivity() {
                             Uri.fromParts("package", packageName, null)))
                     },
                 ) {
-                    LaunchedEffect(Unit) { camera.bind(CameraSelector.LENS_FACING_BACK, Aspect.PHOTO_4_3) }
-                    AndroidView(::createPreviewView, Modifier.fillMaxSize())
+                    CameraScreen(
+                        vm, camera, renderThread,
+                        onCapturePhoto = { Log.i(TAG, "capture photo (Task 9)") },
+                        onToggleRecording = { Log.i(TAG, "toggle recording (Task 10)") },
+                    ) { AndroidView(::createPreviewView, Modifier.fillMaxSize()) }
                 }
             }
         }
@@ -94,4 +99,8 @@ class MainActivity : ComponentActivity() {
 
     private fun hasCameraPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    private companion object {
+        const val TAG = "MainActivity"
+    }
 }

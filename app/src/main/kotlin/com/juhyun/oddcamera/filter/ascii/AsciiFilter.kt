@@ -63,7 +63,7 @@ object AsciiFilter : Filter {
         IntParam("columns", "가로 문자 수", 30, 160, 60),
         BoolParam("fullFrame", "전체 화면", false),
         ChoiceParam("glyphSet", "문자 종류", listOf(
-            "classic" to "classic", "dots" to "dots", "blocks" to "blocks", "binary" to "binary",
+            "classic" to "클래식", "dots" to "점", "blocks" to "블록", "binary" to "이진",
             "custom" to "직접 입력"), "classic"),
         TextParam("customGlyphs", "직접 입력 문자", "", maxCodePoints = 16),
     )

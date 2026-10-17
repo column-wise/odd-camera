@@ -1,10 +1,15 @@
 package com.juhyun.oddcamera.camera
 
 import android.content.Context
+import android.hardware.display.DisplayManager
 import android.util.Log
 import android.util.Rational
+import android.view.Display
 import android.view.Surface
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DisplayOrientedMeteringPointFactory
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
@@ -14,23 +19,88 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.juhyun.oddcamera.render.RenderThread
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import java.util.concurrent.TimeUnit
 
 enum class Aspect { PHOTO_4_3, VIDEO_16_9 }
+enum class FlashMode { OFF, AUTO, ON }
 
-/** Binds CameraX use cases to the lifecycle owner; preview frames go to the RenderThread. */
+/** Binds CameraX use cases to the lifecycle owner; preview frames go to the RenderThread. Main thread only. */
 class CameraController(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
     private val renderThread: RenderThread,
 ) {
-    /** lens: CameraSelector.LENS_FACING_BACK / LENS_FACING_FRONT. */
-    fun bind(lens: Int, aspect: Aspect) {
+    /** Currently bound lens (CameraSelector.LENS_FACING_*) and aspect; changed only by a successful bind. */
+    private var lens = CameraSelector.LENS_FACING_BACK
+    private var aspect = Aspect.PHOTO_4_3
+    private var camera: Camera? = null
+
+    private val _zoomRange = MutableStateFlow(1f..1f)
+    val zoomRange: StateFlow<ClosedFloatingPointRange<Float>> = _zoomRange
+    private val _zoomRatio = MutableStateFlow(1f)
+    val zoomRatio: StateFlow<Float> = _zoomRatio
+
+    /** Applied to ImageCapture in Task 9. */
+    var flashMode = FlashMode.OFF
+        private set
+
+    /** User-facing bind failure messages (Korean). */
+    private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val errors: SharedFlow<String> = _errors
+
+    fun setAspect(a: Aspect) = bind(lens, a)
+
+    fun switchLens() = bind(
+        if (lens == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK,
+        aspect,
+    )
+
+    fun setZoomRatio(r: Float) {
+        val c = camera ?: return
+        val z = r.coerceIn(_zoomRange.value)
+        _zoomRatio.value = z // optimistic, so pinch steps compound on the requested ratio
+        c.cameraControl.setZoomRatio(z)
+    }
+
+    fun setFlash(mode: FlashMode) { flashMode = mode }
+
+    fun setTorch(on: Boolean) { camera?.cameraControl?.enableTorch(on) }
+
+    /** Normalized coords in the displayed (upright, mirrored-for-front) preview. */
+    fun focusAt(xNorm: Float, yNorm: Float) {
+        val c = camera ?: return
+        val display = context.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+        // ponytail: maps against the full camera frame, ignoring the viewport crop (none for 4:3 photo / 16:9 video
+        // streams at their native aspects); account for the crop rect if a fallback resolution crops.
+        val point = DisplayOrientedMeteringPointFactory(display, c.cameraInfo, 1f, 1f).createPoint(xNorm, yNorm)
+        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+            .build()
+        c.cameraControl.startFocusAndMetering(action)
+    }
+
+    private fun bind(lens: Int, aspect: Aspect) {
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
+            val provider = future.get()
+            val selector = CameraSelector.Builder().requireLensFacing(lens).build()
+            if (!provider.hasCamera(selector)) {
+                _errors.tryEmit(if (lens == CameraSelector.LENS_FACING_FRONT) "전면 카메라를 사용할 수 없습니다" else "후면 카메라를 사용할 수 없습니다")
+                return@addListener
+            }
             try {
-                bindNow(future.get(), lens, aspect)
+                bindNow(provider, lens, aspect)
             } catch (e: Exception) {
                 Log.e(TAG, "camera bind failed", e)
+                _errors.tryEmit("카메라를 열 수 없습니다")
+                if (camera != null && (lens != this.lens || aspect != this.aspect)) {
+                    // Keep the previous configuration running.
+                    try { bindNow(provider, this.lens, this.aspect) } catch (e2: Exception) { Log.e(TAG, "rebind failed", e2) }
+                }
             }
         }, ContextCompat.getMainExecutor(context))
     }
@@ -51,9 +121,17 @@ class CameraController(
             .setViewPort(ViewPort.Builder(ratio, Surface.ROTATION_0).build())
             .addUseCase(preview)
             .build()
-        renderThread.mirror = lens == CameraSelector.LENS_FACING_FRONT
+        camera?.cameraInfo?.zoomState?.removeObservers(lifecycleOwner)
         provider.unbindAll()
-        provider.bindToLifecycle(lifecycleOwner, CameraSelector.Builder().requireLensFacing(lens).build(), group)
+        val c = provider.bindToLifecycle(lifecycleOwner, CameraSelector.Builder().requireLensFacing(lens).build(), group)
+        renderThread.mirror = lens == CameraSelector.LENS_FACING_FRONT
+        camera = c
+        this.lens = lens
+        this.aspect = aspect
+        c.cameraInfo.zoomState.observe(lifecycleOwner) { z ->
+            _zoomRange.value = z.minZoomRatio..z.maxZoomRatio
+            _zoomRatio.value = z.zoomRatio
+        }
     }
 
     private companion object {

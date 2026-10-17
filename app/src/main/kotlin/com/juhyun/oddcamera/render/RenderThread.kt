@@ -61,7 +61,10 @@ class RenderThread : HandlerThread("RenderThread") {
     private var displayW = 0
     private var displayH = 0
 
+    /** Stream whose frames are rendered (the newest request). */
     private var stream: CameraStream? = null
+    /** Every stream not yet released, incl. replaced ones still awaiting CameraX's release callback. */
+    private val liveStreams = ArrayList<CameraStream>()
     private var quitting = false
     private var frame: GlUtil.Fbo? = null
     private var filtered: GlUtil.Fbo? = null
@@ -127,13 +130,13 @@ class RenderThread : HandlerThread("RenderThread") {
         handler.post {
             quitting = true
             releaseDisplay()
-            if (stream == null) finishShutdown() else handler.postDelayed(::finishShutdown, 1000) // fallback
+            if (liveStreams.isEmpty()) finishShutdown() else handler.postDelayed(::finishShutdown, 1000) // fallback
         }
     }
 
     private fun finishShutdown() {
         if (egl == null) return
-        stream?.let { releaseStream(it) }
+        liveStreams.toList().forEach(::releaseStream)
         frame?.release()
         frame = null
         filtered?.release()
@@ -159,6 +162,7 @@ class RenderThread : HandlerThread("RenderThread") {
         val st = SurfaceTexture(tex).apply { setDefaultBufferSize(size.width, size.height) }
         val s = CameraStream(tex, st, Surface(st), size.width, size.height)
         stream = s // a previous stream stays alive until its own result callback below
+        liveStreams += s
         st.setOnFrameAvailableListener({ if (stream === s) onFrame(s) }, handler)
         request.setTransformationInfoListener({ handler.post(it) }) { info ->
             s.crop = info.cropRect
@@ -167,7 +171,7 @@ class RenderThread : HandlerThread("RenderThread") {
         request.provideSurface(s.surface, { handler.post(it) }) {
             // Camera is done with this surface.
             if (egl != null) releaseStream(s)
-            if (quitting && stream == null) finishShutdown()
+            if (quitting && liveStreams.isEmpty()) finishShutdown()
         }
     }
 
@@ -175,6 +179,7 @@ class RenderThread : HandlerThread("RenderThread") {
         if (s.released) return
         s.released = true
         if (stream === s) stream = null
+        liveStreams -= s
         s.st.setOnFrameAvailableListener(null)
         s.surface.release()
         s.st.release()
@@ -190,6 +195,7 @@ class RenderThread : HandlerThread("RenderThread") {
 
     private fun onFrame(s: CameraStream) {
         if (egl == null) return
+        val mirror = mirror // read once: the OES pass and the capture snapshot must agree
         s.st.updateTexImage()
         s.st.getTransformMatrix(stMatrix)
 
@@ -224,12 +230,12 @@ class RenderThread : HandlerThread("RenderThread") {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GlUtil.checkGlError("oes->frame")
 
-        applyFilter(f)
+        applyFilter(f, mirror)
         drawDisplay()
     }
 
     /** frame -> analysis -> active filter -> filtered FBO; publishes the analysis for capture. */
-    private fun applyFilter(f: GlUtil.Fbo) {
+    private fun applyFilter(f: GlUtil.Fbo, mirror: Boolean) {
         val sel = selection
         if (sel.filter !== analyzedFilter) {
             analyzedFilter = sel.filter
