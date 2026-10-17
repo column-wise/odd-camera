@@ -1,13 +1,97 @@
 package com.juhyun.oddcamera
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
+import android.view.OrientationEventListener
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.material3.Text
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.layout.Box
+import androidx.core.content.ContextCompat
+import com.juhyun.oddcamera.camera.Aspect
+import com.juhyun.oddcamera.camera.CameraController
+import com.juhyun.oddcamera.render.RenderThread
+import com.juhyun.oddcamera.ui.PermissionGate
 
 class MainActivity : ComponentActivity() {
+    private lateinit var renderThread: RenderThread
+    private lateinit var camera: CameraController
+    private lateinit var orientationListener: OrientationEventListener
+    private var granted by mutableStateOf(false)
+
+    private val requestPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { Text("Odd Camera") }
+        renderThread = RenderThread().startAndWait()
+        camera = CameraController(this, this, renderThread)
+        orientationListener = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation != ORIENTATION_UNKNOWN) renderThread.outputRotationDeg = (orientation + 45) / 90 * 90 % 360
+            }
+        }
+        granted = hasCameraPermission()
+        if (!granted && savedInstanceState == null) requestPermission.launch(Manifest.permission.CAMERA)
+
+        setContent {
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                PermissionGate(
+                    granted = granted,
+                    onRequest = { requestPermission.launch(Manifest.permission.CAMERA) },
+                    onOpenSettings = {
+                        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", packageName, null)))
+                    },
+                ) {
+                    LaunchedEffect(Unit) { camera.bind(CameraSelector.LENS_FACING_BACK, Aspect.PHOTO_4_3) }
+                    AndroidView(::createPreviewView, Modifier.fillMaxSize())
+                }
+            }
+        }
     }
+
+    private fun createPreviewView(context: android.content.Context) = SurfaceView(context).apply {
+        holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) = Unit
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) =
+                renderThread.attachDisplay(holder.surface, w, h)
+            override fun surfaceDestroyed(holder: SurfaceHolder) = renderThread.detachDisplay()
+        })
+    }
+
+    override fun onStart() {
+        super.onStart()
+        granted = hasCameraPermission() // may have changed in system settings
+        orientationListener.enable()
+    }
+
+    override fun onStop() {
+        orientationListener.disable()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        renderThread.shutdown()
+    }
+
+    private fun hasCameraPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 }
