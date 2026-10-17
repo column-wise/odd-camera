@@ -51,7 +51,10 @@ Reference behaviour was prototyped in a browser demo (`.superpowers` scratch, no
 ### ASCII (from clip 2)
 - Divide the frame into a grid of cells. Cells brighter than the threshold become a light background with a dark character chosen by brightness; cells below threshold show the original image.
 - Also a **full-frame** variant (whole image as characters) behind a toggle.
-- User controls: brightness threshold (same relative scheme), cell size, full-frame toggle.
+- User controls: brightness threshold (same relative scheme), cell size, full-frame toggle, **glyph set** (user request): choose which characters are drawn, in the same settings panel as the threshold. Presets plus a custom string the user types.
+
+### Settings persistence (user request)
+Every filter's parameter values are **saved per filter** and restored on next launch; changing ASCII settings never affects Light Boxes and vice versa.
 
 Parameters must be **resolution-independent** (e.g. cell size and box line width as a fraction of frame width) so the same settings produce the same look in preview, 1080p video and full-res photo.
 
@@ -95,5 +98,4 @@ Dev/test device: Samsung Galaxy S26 Ultra (SM-S948N), Android 16 / API 36, Snapd
 - Module/package layout, UI styling, icons, the app's visual design.
 - How photo capture reproduces the preview effect at full resolution (e.g. full-res capture run through the same shader offscreen), as long as the anti-goal holds.
 - Exact slider ranges and defaults.
-- Whether parameters persist between launches.
 - Permission UX (camera, microphone).

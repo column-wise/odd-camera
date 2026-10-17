@@ -21,6 +21,8 @@
 - Front camera: saved output is **mirrored exactly as the preview shows it**.
 - Filter parameters are **resolution-independent** (normalized to frame width / relative thresholds).
 - Brightness threshold default is **relative** ("top N % brightest").
+- **Every filter's parameter values persist per filter** across launches (DataStore Preferences, key `"<filterId>.<paramKey>"`).
+- ASCII glyph set is user-selectable (presets + custom string) in the same param panel as the threshold.
 - Light Boxes photo shows **exactly the boxes on screen at the shutter moment** (analysis snapshot at shutter, or at timer expiry).
 - Adding a filter = new `Filter` implementation + one registry line; no camera/record/save code changes.
 - Must run on other Android phones, not only the S26 Ultra: performance degradation tiers + encoder fallback.
@@ -50,6 +52,7 @@ odd-camera/
     ui/FilterPager.kt               swipe between filters + generated param panel
     camera/CameraController.kt      CameraX binding, zoom/flash/torch/focus/lens, ViewPort aspect
     camera/CountdownTimer.kt        pure timer logic
+    filter/ParamStore.kt            per-filter persistence (DataStore)
     filter/FilterParam.kt           param declarations + ParamValues
     filter/Filter.kt                Filter / FilterRenderer / FrameAnalysis interfaces
     filter/FilterRegistry.kt        ordered list of filters
@@ -81,9 +84,14 @@ data class FloatParam(override val key: String, override val label: String,
 data class IntParam(override val key: String, override val label: String,
                     val min: Int, val max: Int, val default: Int) : FilterParam
 data class BoolParam(override val key: String, override val label: String, val default: Boolean) : FilterParam
+data class ChoiceParam(override val key: String, override val label: String,
+                       val options: List<Pair<String, String>>, val default: String) : FilterParam   // (id, label)
+data class TextParam(override val key: String, override val label: String,
+                     val default: String, val maxCodePoints: Int) : FilterParam
 class ParamValues(defs: List<FilterParam>) {          // thread-safe snapshot-able map
-  fun float(key: String): Float; fun int(key: String): Int; fun bool(key: String): Boolean
+  fun float(key: String): Float; fun int(key: String): Int; fun bool(key: String): Boolean; fun string(key: String): String
   fun set(key: String, value: Any); fun snapshot(): ParamValues
+  fun toStringMap(): Map<String, String>; fun loadFrom(map: Map<String, String>)   // persistence; unknown/invalid entries ignored
 }
 
 // filter/Filter.kt
@@ -139,6 +147,12 @@ Box geometry (Task 3): `data class Box(val x: Float, val y: Float, val w: Float,
   val luma = ByteArray(1000) { 200.toByte() }
   assertEquals(256, percentileThreshold(lumaHistogram(luma), 3f))
 }
+@Test fun paramValuesRoundTripAndRejectsGarbage() {
+  val defs = listOf(IntParam("n", "N", 5, 150, 40), ChoiceParam("g", "G", listOf("a" to "A", "b" to "B"), "a"))
+  val v = ParamValues(defs); v.set("n", 77); v.set("g", "b")
+  val w = ParamValues(defs); w.loadFrom(v.toStringMap() + mapOf("n" to "oops", "zzz" to "1"))
+  assertEquals(40, w.int("n")); assertEquals("b", w.string("g"))   // bad value → default, unknown key ignored
+}
 @Test fun paramValuesDefaultsAndSnapshotIsolation() {
   val v = ParamValues(listOf(FloatParam("p", "P", 0f, 10f, 3f, 0.5f)))
   val snap = v.snapshot(); v.set("p", 5f)
@@ -147,7 +161,7 @@ Box geometry (Task 3): `data class Box(val x: Float, val y: Float, val w: Float,
 ```
 
 - [ ] **Step 2:** Run `./gradlew :app:testDebugUnitTest` → FAIL (unresolved references).
-- [ ] **Step 3:** Implement. `ParamValues.set` clamps to declared range.
+- [ ] **Step 3:** Implement. `ParamValues.set` clamps to declared range; Choice rejects unknown ids; Text truncates to `maxCodePoints`.
 - [ ] **Step 4:** Run → PASS.
 - [ ] **Step 5:** Commit `feat: filter params and percentile threshold`.
 
@@ -247,26 +261,30 @@ Box geometry (Task 3): `data class Box(val x: Float, val y: Float, val w: Float,
   - `FloatParam("topPercent", "밝은 부분 상위 %", 1f, 60f, 25f, 1f)`
   - `IntParam("columns", "가로 문자 수", 30, 160, 60)` (cell size = w / columns → resolution-independent)
   - `BoolParam("fullFrame", "전체 화면", false)`
+  - `ChoiceParam("glyphSet", "문자 종류", options, "classic")` — presets (dark→bright ramps): `classic` " .:-=+*#%@", `dots` " ·•●", `blocks` " ░▒▓█", `binary` " 01", `hangul` " ㆍㅇㅎ훔", `custom` "직접 입력"
+  - `TextParam("customGlyphs", "직접 입력 문자", "", maxCodePoints = 16)` — used when `glyphSet == custom`
+  - `fun resolveRamp(glyphSet: String, custom: String, inkOf: (String) -> Float): List<String>` (pure) — preset → its ramp split by code point; custom → distinct code points sorted by `inkOf` ascending with a leading space; fewer than 1 usable glyph → classic. Works on code points (emoji / Hangul safe).
   - `fun glyphIndex(luma: Int, threshold: Int, rampSize: Int): Int` (pure; brighter → denser glyph, clamped to `0 until rampSize`)
-- Ramp `" .:-=+*#%@"`; glyph atlas texture built once from `Canvas` text into a bitmap (monospace bold), 1 row × 10 cells.
+- Glyph atlas texture built from `Canvas` text into a bitmap (monospace bold), 1 row × ramp size; **rebuilt on the GL thread whenever the resolved ramp changes**. `inkOf` = fraction of opaque pixels when the glyph is drawn into a cell bitmap. Ramp size passed as a uniform.
 - Shader: per cell, sample src at cell center (mip/box average of 4 taps), compute luma. Mask mode: luma > threshold → light background `#F4F0FF` with glyph in `#555555` (every third cell `#CC3333`), else src pixel. Full-frame: black background, glyph tinted with cell color. Threshold passed as uniform from `FrameAnalysis.threshold`.
 
-- [ ] **Step 1:** `GlyphIndexTest`: `glyphIndex(255, 100, 10) == 9`, `glyphIndex(101, 100, 10) == 0`, out-of-range clamps. `AsciiRenderTest`: render synthetic half-white frame at 2 widths, compare downscaled (same as Task 6); in mask mode a pixel in the dark half equals the src pixel.
+- [ ] **Step 1:** `GlyphIndexTest`: `glyphIndex(255, 100, 10) == 9`, `glyphIndex(101, 100, 10) == 0`, out-of-range clamps. `ResolveRampTest`: `resolveRamp("blocks", "", ink) == listOf(" ","░","▒","▓","█")`; custom `"@a."` with fake ink {.:0.1,a:0.4,@:0.8} → `[" ",".","a","@"]`; custom `""` → classic; custom `"😀😀가"` → 3 entries, no exception. `AsciiRenderTest`: render synthetic half-white frame at 2 widths, compare downscaled (same as Task 6); in mask mode a pixel in the dark half equals the src pixel.
 - [ ] **Step 2:** FAIL → **Step 3:** Implement → **Step 4:** PASS.
 - [ ] **Step 5:** Commit `feat: ascii filter`.
 
 ### Task 8: Camera controls + UI
 
-**Files:** Create `ui/CameraScreen.kt`, `ui/FilterPager.kt`, `camera/CountdownTimer.kt`; Modify `CameraController.kt`, `MainActivity.kt`; Test `test/.../camera/CountdownTimerTest.kt`
+**Files:** Create `ui/CameraScreen.kt`, `ui/FilterPager.kt`, `camera/CountdownTimer.kt`, `filter/ParamStore.kt`; Modify `CameraController.kt`, `MainActivity.kt`, `app/build.gradle.kts` (add `androidx.datastore:datastore-preferences`); Test `test/.../camera/CountdownTimerTest.kt`, `test/.../filter/ParamStoreTest.kt`
 
 **Interfaces:**
 - Consumes: `FilterRegistry`, `RenderThread.setFilter`, `CameraController`.
 - Produces:
   - `CameraController`: `fun setZoomRatio(r: Float)`, `val zoomRange: StateFlow<ClosedFloatingPointRange<Float>>`, `fun setFlash(mode: FlashMode)` (`enum FlashMode { OFF, AUTO, ON }`), `fun setTorch(on: Boolean)`, `fun focusAt(xNorm: Float, yNorm: Float)` (`FocusMeteringAction` AF+AE, auto-cancel 3 s), `fun switchLens()` (sets `renderThread.mirror = lens == FRONT`), `fun setAspect(a: Aspect)`.
   - `class CountdownTimer(seconds: Int, tick: (Int) -> Unit, done: () -> Unit, scheduler: (Long, () -> Unit) -> Unit)` with `start()`, `cancel()`; seconds ∈ {0, 3, 10}; 0 fires `done` immediately.
-  - UI: top bar flash (cycles OFF/AUTO/ON; in video mode becomes torch toggle), timer (cycles 0/3/10), lens switch. Bottom: last-capture thumbnail (tap → `ACTION_VIEW` on the MediaStore URI), shutter, Photo/Video toggle. Zoom: pinch + `0.5x/1x/2x/5x` buttons filtered to `zoomRange`. Tap on preview → `focusAt` + focus ring. Horizontal swipe on preview → next/prev filter, filter title toast-chip. A slider icon opens the param panel generated from `filter.params` (Slider for Float/Int, Switch for Bool), writing to that filter's `ParamValues` (one `ParamValues` per filter, kept in a ViewModel).
+  - UI: top bar flash (cycles OFF/AUTO/ON; in video mode becomes torch toggle), timer (cycles 0/3/10), lens switch. Bottom: last-capture thumbnail (tap → `ACTION_VIEW` on the MediaStore URI), shutter, Photo/Video toggle. Zoom: pinch + `0.5x/1x/2x/5x` buttons filtered to `zoomRange`. Tap on preview → `focusAt` + focus ring. Horizontal swipe on preview → next/prev filter, filter title toast-chip. A slider icon opens the param panel generated from `filter.params` (Slider for Float/Int, Switch for Bool, chip row for Choice, single-line TextField for Text — shown only when a sibling Choice is `custom`), writing to that filter's `ParamValues` (one `ParamValues` per filter, kept in a ViewModel).
+  - `class ParamStore(dataStore: DataStore<Preferences>) { suspend fun load(filter: Filter): ParamValues; suspend fun save(filterId: String, values: ParamValues) }` — keys `"<filterId>.<paramKey>"` as strings via `toStringMap`/`loadFrom`. ViewModel loads all filters at start and saves a filter's values debounced 300 ms after any change.
 
-- [ ] **Step 1:** `CountdownTimerTest` with fake scheduler: 3 s → ticks 3,2,1 then done; cancel stops done; 0 → done immediately.
+- [ ] **Step 1:** `CountdownTimerTest` with fake scheduler: 3 s → ticks 3,2,1 then done; cancel stops done; 0 → done immediately. `ParamStoreTest` (DataStore on a temp file via `PreferenceDataStoreFactory.create`): save ASCII `columns=90`, Light Boxes `maxBoxes=10`; a fresh store instance on the same file loads 90 / 10, and Light Boxes `topPercent` is still its default (per-filter isolation).
 - [ ] **Step 2:** FAIL → **Step 3:** Implement → **Step 4:** PASS. Manual checklist on device: each control works, swipe cycles 3 filters, sliders change preview live.
 - [ ] **Step 5:** Commit `feat: camera controls and filter UI`.
 
