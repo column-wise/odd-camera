@@ -51,6 +51,25 @@ class FilterPipelineTest {
         reader.release()
     }
 
+    /** 1280x960 -> 160: 8x8 texel blocks. A 2x2 lamp must survive at every sub-block offset (max-pool). */
+    @Test fun smallBrightDotNeverVanishes() {
+        val reader = AnalysisReader()
+        val dotTex = GlUtil.createTexture(GLES30.GL_TEXTURE_2D)
+        val white = Paint().apply { color = Color.WHITE }
+        for (dy in 0 until 8) for (dx in 0 until 8) {
+            val bmp = Bitmap.createBitmap(1280, 960, Bitmap.Config.ARGB_8888).apply {
+                eraseColor(Color.BLACK)
+                Canvas(this).drawRect(640f + dx, 480f + dy, 642f + dx, 482f + dy, white)
+            }
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, dotTex)
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bmp, 0)
+            bmp.recycle()
+            val top = reader.read(dotTex, 1280, 960, 160).histogram[255]
+            assertTrue("dot at +$dx,+$dy: top bin $top", top in 1..4)
+        }
+        reader.release()
+    }
+
     @Test fun noneFilterCopiesSource() {
         val params = ParamValues(NoneFilter.params)
         val analysis = NoneFilter.analyze(AnalysisReader().read(tex, W, H, 160), params, null)
