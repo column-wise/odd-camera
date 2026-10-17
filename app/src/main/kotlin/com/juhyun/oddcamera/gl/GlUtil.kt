@@ -20,9 +20,9 @@ void main() {
     gl_Position = vec4(aPos, 0.0, 1.0);
 }"""
 
-    /** Copies uTex (unit 0). */
+    /** Copies uTex (unit 0). highp: mediump (fp16) texcoords are off by ~1 texel on 4000 px photos. */
     const val COPY_FS = """#version 300 es
-precision mediump float;
+precision highp float;
 uniform sampler2D uTex;
 in vec2 vUv;
 out vec4 outColor;

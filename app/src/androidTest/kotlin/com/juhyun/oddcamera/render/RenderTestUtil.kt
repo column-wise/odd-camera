@@ -34,3 +34,18 @@ fun downscaledMad(a: IntArray, wa: Int, ha: Int, b: IntArray, wb: Int, hb: Int):
     val da = down(a, wa, ha); val db = down(b, wb, hb)
     return da.indices.sumOf { Math.abs(da[it] - db[it]) } / da.size
 }
+
+/** Uploads an image-order bitmap as an upright frame texture (GL row 0 = frame bottom), like the camera frame FBO. */
+fun uploadUpright(b: android.graphics.Bitmap): Int {
+    val w = b.width; val h = b.height
+    val px = IntArray(w * h).also { b.getPixels(it, 0, w, 0, 0, w, h) }
+    val buf = ByteBuffer.allocateDirect(w * h * 4)
+    for (r in 0 until h) for (x in 0 until w) {
+        val c = px[(h - 1 - r) * w + x]
+        buf.put(Color.red(c).toByte()).put(Color.green(c).toByte()).put(Color.blue(c).toByte()).put(-1)
+    }
+    buf.position(0)
+    val tex = com.juhyun.oddcamera.gl.GlUtil.createTexture(GLES30.GL_TEXTURE_2D)
+    GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+    return tex
+}

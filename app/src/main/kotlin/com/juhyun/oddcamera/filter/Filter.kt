@@ -6,6 +6,12 @@ class LumaFrame(val luma: ByteArray, val width: Int, val height: Int, val histog
 /** threshold: absolute luma threshold actually used, 0..256 (256 = nothing passes; ruling R3). */
 interface FrameAnalysis { val threshold: Int }
 
+/** An analysis holding frame geometry; photo capture rotates it with the output (threshold-only ones need not). */
+interface RotatableAnalysis : FrameAnalysis {
+    /** Same analysis in the frame rotated clockwise by deg (0/90/180/270). */
+    fun rotated(deg: Int): FrameAnalysis
+}
+
 /**
  * A preview/photo/video effect. Adding a filter = implement this + one line in [FilterRegistry].
  * analyze() runs on the GL thread once per frame with a params snapshot; `previous` is null on the

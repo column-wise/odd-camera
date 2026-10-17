@@ -10,6 +10,7 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.DisplayOrientedMeteringPointFactory
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
@@ -44,8 +45,11 @@ class CameraController(
     private val _zoomRatio = MutableStateFlow(1f)
     val zoomRatio: StateFlow<Float> = _zoomRatio
 
-    /** Applied to ImageCapture in Task 9. */
     var flashMode = FlashMode.OFF
+        private set
+
+    /** Bound only in photo mode (same UseCaseGroup/ViewPort as the preview); null in video mode. */
+    var imageCapture: ImageCapture? = null
         private set
 
     /** User-facing bind failure messages (Korean). */
@@ -66,7 +70,20 @@ class CameraController(
         c.cameraControl.setZoomRatio(z)
     }
 
-    fun setFlash(mode: FlashMode) { flashMode = mode }
+    fun setFlash(mode: FlashMode) {
+        flashMode = mode
+        applyFlash()
+    }
+
+    private fun applyFlash() {
+        val ic = imageCapture ?: return
+        // A lens without a flash unit (most front cameras) stays OFF.
+        ic.flashMode = if (camera?.cameraInfo?.hasFlashUnit() != true) ImageCapture.FLASH_MODE_OFF else when (flashMode) {
+            FlashMode.OFF -> ImageCapture.FLASH_MODE_OFF
+            FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
+            FlashMode.ON -> ImageCapture.FLASH_MODE_ON
+        }
+    }
 
     fun setTorch(on: Boolean) { camera?.cameraControl?.enableTorch(on) }
 
@@ -116,16 +133,26 @@ class CameraController(
             .setTargetRotation(Surface.ROTATION_0)
             .build()
         preview.setSurfaceProvider(renderThread.cameraSurfaceProvider())
-        // Task 9 adds ImageCapture to this group; the shared ViewPort keeps preview crop == capture crop.
+        // Default still size for the aspect (the binned ~12 MP stream, never the max-resolution sensor mode).
+        val capture = if (aspect == Aspect.PHOTO_4_3) ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(strategy).build())
+            .setTargetRotation(Surface.ROTATION_0)
+            .build() else null
+        // The shared ViewPort keeps preview crop == capture crop.
         val group = UseCaseGroup.Builder()
             .setViewPort(ViewPort.Builder(ratio, Surface.ROTATION_0).build())
             .addUseCase(preview)
+            .apply { capture?.let(::addUseCase) }
             .build()
         camera?.cameraInfo?.zoomState?.removeObservers(lifecycleOwner)
         provider.unbindAll()
+        imageCapture = null
         val c = provider.bindToLifecycle(lifecycleOwner, CameraSelector.Builder().requireLensFacing(lens).build(), group)
         renderThread.mirror = lens == CameraSelector.LENS_FACING_FRONT
         camera = c
+        imageCapture = capture
+        applyFlash()
         this.lens = lens
         this.aspect = aspect
         c.cameraInfo.zoomState.observe(lifecycleOwner) { z ->

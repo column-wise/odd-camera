@@ -9,6 +9,7 @@ import com.juhyun.oddcamera.filter.FrameAnalysis
 import com.juhyun.oddcamera.filter.IntParam
 import com.juhyun.oddcamera.filter.LumaFrame
 import com.juhyun.oddcamera.filter.ParamValues
+import com.juhyun.oddcamera.filter.RotatableAnalysis
 import com.juhyun.oddcamera.filter.percentileThreshold
 import com.juhyun.oddcamera.gl.GlProgram
 import com.juhyun.oddcamera.gl.GlUtil
@@ -16,7 +17,19 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
-class LightBoxesAnalysis(override val threshold: Int, val boxes: List<Box>) : FrameAnalysis
+class LightBoxesAnalysis(override val threshold: Int, val boxes: List<Box>) : RotatableAnalysis {
+    override fun rotated(deg: Int) = LightBoxesAnalysis(threshold, rotateBoxes(boxes, deg))
+}
+
+/** Normalized boxes in the frame rotated clockwise by deg: point (x, y) -> 90: (1-y, x), 180: (1-x, 1-y), 270: (y, 1-x). */
+fun rotateBoxes(boxes: List<Box>, deg: Int): List<Box> = boxes.map { b ->
+    when (Math.floorMod(deg, 360)) {
+        90 -> b.copy(x = 1 - b.y - b.h, y = b.x, w = b.h, h = b.w)
+        180 -> b.copy(x = 1 - b.x - b.w, y = 1 - b.y - b.h)
+        270 -> b.copy(x = b.y, y = 1 - b.x - b.w, w = b.h, h = b.w)
+        else -> b
+    }
+}
 
 /** Thin white outlines (some with a small filled mark) around the brightest regions. */
 object LightBoxesFilter : Filter {

@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.OrientationEventListener
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
 import androidx.activity.compose.setContent
@@ -24,11 +25,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.layout.Box
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.juhyun.oddcamera.camera.CameraController
+import com.juhyun.oddcamera.capture.MediaSaver
+import com.juhyun.oddcamera.capture.PhotoCapturer
 import com.juhyun.oddcamera.render.RenderThread
 import com.juhyun.oddcamera.ui.CameraScreen
 import com.juhyun.oddcamera.ui.CameraViewModel
 import com.juhyun.oddcamera.ui.PermissionGate
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class MainActivity : ComponentActivity() {
     private lateinit var renderThread: RenderThread
@@ -36,6 +44,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var orientationListener: OrientationEventListener
     private var granted by mutableStateOf(false)
     private val vm: CameraViewModel by viewModels()
+    /** One capture pipeline at a time (each holds several full-size bitmaps). */
+    private val captureLock = Mutex()
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
@@ -64,12 +74,33 @@ class MainActivity : ComponentActivity() {
                 ) {
                     CameraScreen(
                         vm, camera, renderThread,
-                        onCapturePhoto = { Log.i(TAG, "capture photo (Task 9)") },
+                        onCapturePhoto = ::capturePhoto,
                         onToggleRecording = { Log.i(TAG, "toggle recording (Task 10)") },
                     ) { AndroidView(::createPreviewView, Modifier.fillMaxSize()) }
                 }
             }
         }
+    }
+
+    /** Shutter (after the timer): freeze what the preview shows now, then capture. Never throws. */
+    private fun capturePhoto() {
+        val snapshot = renderThread.snapshotForCapture()
+        val ic = camera.imageCapture
+        if (snapshot == null || ic == null) return photoFailed(null)
+        lifecycleScope.launch {
+            try {
+                captureLock.withLock { vm.lastCapture.value = PhotoCapturer(renderThread, ic, MediaSaver(contentResolver)).capture(snapshot) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) { // incl. OutOfMemoryError: a failed photo must never take the camera down
+                photoFailed(t)
+            }
+        }
+    }
+
+    private fun photoFailed(t: Throwable?) {
+        Log.e(TAG, "photo capture failed", t)
+        Toast.makeText(this, "사진 저장 실패", Toast.LENGTH_SHORT).show()
     }
 
     private fun createPreviewView(context: android.content.Context) = SurfaceView(context).apply {

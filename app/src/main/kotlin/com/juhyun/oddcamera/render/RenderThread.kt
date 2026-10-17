@@ -1,5 +1,6 @@
 package com.juhyun.oddcamera.render
 
+import android.graphics.Bitmap
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
@@ -56,6 +57,7 @@ class RenderThread : HandlerThread("RenderThread") {
     private var previous: FrameAnalysis? = null
     private lateinit var oesProgram: GlProgram
     private lateinit var blitProgram: GlProgram
+    private var photoRenderer: PhotoRenderer? = null
 
     private var display: EGLSurface? = null
     private var displayW = 0
@@ -100,6 +102,16 @@ class RenderThread : HandlerThread("RenderThread") {
     /** Null until the first frame has been rendered. Thread-safe. */
     fun snapshotForCapture(): CaptureSnapshot? = lastRendered?.copy(rotationDeg = outputRotationDeg)
 
+    /**
+     * Filters a still with the snapshot (see [PhotoRenderer.render]) on the GL thread, through the same renderer
+     * instance the preview uses. Blocks the caller (not main) while the GL thread renders.
+     */
+    fun renderPhoto(src: Bitmap, snapshot: CaptureSnapshot): Bitmap = runSync {
+        checkNotNull(egl) { "render thread shut down" }
+        val photo = photoRenderer ?: PhotoRenderer().also { photoRenderer = it }
+        photo.render(src, snapshot, rendererFor(snapshot.filter))
+    } ?: error("render thread gone")
+
     /** Blocks until the GL thread is ready. */
     fun startAndWait(): RenderThread {
         start()
@@ -107,16 +119,20 @@ class RenderThread : HandlerThread("RenderThread") {
         return this
     }
 
-    fun attachDisplay(surface: Surface, w: Int, h: Int) = runSync {
-        val core = egl ?: return@runSync
-        if (display == null) display = core.createWindowSurface(surface)
-        displayW = w
-        displayH = h
-        drawDisplay()
+    fun attachDisplay(surface: Surface, w: Int, h: Int) {
+        runSync {
+            val core = egl ?: return@runSync
+            if (display == null) display = core.createWindowSurface(surface)
+            displayW = w
+            displayH = h
+            drawDisplay()
+        }
     }
 
     /** Blocks until the EGL surface is destroyed, so callers may return from surfaceDestroyed safely. */
-    fun detachDisplay() = runSync { releaseDisplay() }
+    fun detachDisplay() {
+        runSync { releaseDisplay() }
+    }
 
     fun cameraSurfaceProvider(): Preview.SurfaceProvider = Preview.SurfaceProvider { request ->
         handler.post { onSurfaceRequested(request) }
@@ -143,6 +159,8 @@ class RenderThread : HandlerThread("RenderThread") {
         filtered = null
         renderers.values.forEach { it.release() }
         renderers.clear()
+        photoRenderer?.release()
+        photoRenderer = null
         analysisReader.release()
         oesProgram.release()
         blitProgram.release()
@@ -250,13 +268,15 @@ class RenderThread : HandlerThread("RenderThread") {
             filtered?.release()
             GlUtil.Fbo(f.width, f.height).also { filtered = it }
         }
-        val renderer = renderers.getOrPut(sel.filter) { sel.filter.createRenderer().apply { init() } }
+        val renderer = rendererFor(sel.filter)
         FilterPass.render(renderer, f.tex, out.id, out.width, out.height, params, analysis)
         GlUtil.checkGlError("filter ${sel.filter.id}")
 
         latestAnalysis = analysis
         lastRendered = CaptureSnapshot(sel.filter, params, analysis, mirror, outputRotationDeg)
     }
+
+    private fun rendererFor(filter: Filter) = renderers.getOrPut(filter) { filter.createRenderer().apply { init() } }
 
     private fun drawDisplay() {
         val core = egl ?: return
@@ -278,16 +298,19 @@ class RenderThread : HandlerThread("RenderThread") {
         if (!core.swap(d)) Log.w(TAG, "eglSwapBuffers failed: 0x${Integer.toHexString(EGL14.eglGetError())}")
     }
 
-    private fun runSync(block: () -> Unit) {
-        val h = Handler(looper ?: return) // getLooper() blocks until prepared; null once the thread died
+    /** Runs block on the GL thread and returns its result; null if the thread is gone. */
+    private fun <T> runSync(block: () -> T): T? {
+        val h = Handler(looper ?: return null) // getLooper() blocks until prepared; null once the thread died
         val latch = CountDownLatch(1)
+        var result: T? = null
         var error: Throwable? = null
         val posted = h.post {
-            try { block() } catch (t: Throwable) { error = t } finally { latch.countDown() }
+            try { result = block() } catch (t: Throwable) { error = t } finally { latch.countDown() }
         }
-        if (!posted) return
+        if (!posted) return null
         latch.await()
         error?.let { throw it }
+        return result
     }
 
     private companion object {
