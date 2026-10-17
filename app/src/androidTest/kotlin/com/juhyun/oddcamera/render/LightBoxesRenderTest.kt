@@ -1,5 +1,6 @@
 package com.juhyun.oddcamera.render
 
+import android.graphics.Color
 import android.opengl.GLES30
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.juhyun.oddcamera.filter.LumaFrame
@@ -41,7 +42,7 @@ class LightBoxesRenderTest {
         return LumaFrame(luma, w, h, lumaHistogram(luma))
     }
 
-    /** Returns red-channel pixels in image order (row 0 = top of frame) and the height. */
+    /** Returns ARGB pixels in image order (row 0 = top of frame) and the height. */
     private fun render(width: Int): Pair<IntArray, Int> {
         val h = width * 3 / 4
         val params = ParamValues(LightBoxesFilter.params)
@@ -51,14 +52,7 @@ class LightBoxesRenderTest {
         val out = GlUtil.Fbo(width, h)
         FilterPass.render(r, black, out.id, width, h, params, analysis)
         GlUtil.checkGlError("render")
-        val buf = ByteBuffer.allocateDirect(width * h * 4)
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, out.id)
-        GLES30.glReadPixels(0, 0, width, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        val px = IntArray(width * h) { i ->
-            val x = i % width; val y = i / width
-            buf.get(((h - 1 - y) * width + x) * 4).toInt() and 0xFF
-        }
+        val px = readImage(out.id, width, h)
         r.release(); out.release()
         return px to h
     }
@@ -66,7 +60,7 @@ class LightBoxesRenderTest {
     @Test fun boxesLandWhereTheBlobsAreNotFlipped() {
         val (px, h) = render(360)
         fun any(x0: Int, y0: Int, x1: Int, y1: Int) =
-            (y0 until y1).any { y -> (x0 until x1).any { x -> px[y * 360 + x] > 128 } }
+            (y0 until y1).any { y -> (x0 until x1).any { x -> Color.red(px[y * 360 + x]) > 128 } }
         assertTrue("outline missing top-left", any(0, 0, 180, h / 2))
         assertTrue("outline missing lower-right", any(180, h / 2, 360, h))
         assertTrue("unexpected outline top-right", !any(180, 0, 360, h / 2))
@@ -76,17 +70,7 @@ class LightBoxesRenderTest {
     @Test fun resolutionIndependent() {
         val (a, ha) = render(360)
         val (b, hb) = render(1440)
-        fun down(p: IntArray, w: Int, h: Int): DoubleArray {
-            val f = w / 90
-            return DoubleArray(90 * (h / f)) { i ->
-                val x = i % 90; val y = i / 90
-                var s = 0
-                for (j in 0 until f) for (k in 0 until f) s += p[(y * f + j) * w + x * f + k]
-                s.toDouble() / (f * f)
-            }
-        }
-        val da = down(a, 360, ha); val db = down(b, 1440, hb)
-        val mad = da.indices.sumOf { Math.abs(da[it] - db[it]) } / da.size
+        val mad = downscaledMad(a, 360, ha, b, 1440, hb)
         assertTrue("mean abs diff $mad >= 6", mad < 6)
     }
 }
