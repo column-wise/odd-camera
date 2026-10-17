@@ -261,7 +261,7 @@ Box geometry (Task 3): `data class Box(val x: Float, val y: Float, val w: Float,
   - `FloatParam("topPercent", "밝은 부분 상위 %", 1f, 60f, 25f, 1f)`
   - `IntParam("columns", "가로 문자 수", 30, 160, 60)` (cell size = w / columns → resolution-independent)
   - `BoolParam("fullFrame", "전체 화면", false)`
-  - `ChoiceParam("glyphSet", "문자 종류", options, "classic")` — presets (dark→bright ramps): `classic` " .:-=+*#%@", `dots` " ·•●", `blocks` " ░▒▓█", `binary` " 01", `hangul` " ㆍㅇㅎ훔", `custom` "직접 입력"
+  - `ChoiceParam("glyphSet", "문자 종류", options, "classic")` — presets (dark→bright ramps): `classic` " .:-=+*#%@", `dots` " ·•●", `blocks` " ░▒▓█", `binary` " 01", `custom` "직접 입력"
   - `TextParam("customGlyphs", "직접 입력 문자", "", maxCodePoints = 16)` — used when `glyphSet == custom`
   - `fun resolveRamp(glyphSet: String, custom: String, inkOf: (String) -> Float): List<String>` (pure) — preset → its ramp split by code point; custom → distinct code points sorted by `inkOf` ascending with a leading space; fewer than 1 usable glyph → classic. Works on code points (emoji / Hangul safe).
   - `fun glyphIndex(luma: Int, threshold: Int, rampSize: Int): Int` (pure; brighter → denser glyph, clamped to `0 until rampSize`)
