@@ -11,6 +11,32 @@ object GlUtil {
     val QUAD: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
         .apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)); position(0) }
 
+    /** Plain full-screen quad vertex shader: vUv 0..1, (0,0) = texture origin. Filters may reuse it. */
+    const val QUAD_VS = """#version 300 es
+in vec2 aPos;
+out vec2 vUv;
+void main() {
+    vUv = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}"""
+
+    /** Copies uTex (unit 0). */
+    const val COPY_FS = """#version 300 es
+precision mediump float;
+uniform sampler2D uTex;
+in vec2 vUv;
+out vec4 outColor;
+void main() { outColor = texture(uTex, vUv); }"""
+
+    /** Draws QUAD with the program's `aPos` attribute; program must be in use. */
+    fun drawQuad(p: GlProgram) {
+        val pos = p.attrib("aPos")
+        GLES30.glEnableVertexAttribArray(pos)
+        GLES30.glVertexAttribPointer(pos, 2, GLES30.GL_FLOAT, false, 0, QUAD)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glDisableVertexAttribArray(pos)
+    }
+
     fun checkGlError(op: String) {
         val err = GLES30.glGetError()
         check(err == GLES30.GL_NO_ERROR) { "$op: glError 0x${Integer.toHexString(err)}" }

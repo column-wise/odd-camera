@@ -13,14 +13,23 @@ import android.util.Log
 import android.view.Surface
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
+import com.juhyun.oddcamera.filter.Filter
+import com.juhyun.oddcamera.filter.FilterRenderer
+import com.juhyun.oddcamera.filter.FrameAnalysis
+import com.juhyun.oddcamera.filter.ParamValues
+import com.juhyun.oddcamera.filter.none.NoneFilter
 import com.juhyun.oddcamera.gl.EglCore
 import com.juhyun.oddcamera.gl.GlProgram
 import com.juhyun.oddcamera.gl.GlUtil
 import java.util.concurrent.CountDownLatch
 
+/** Everything a capture needs to reproduce what the preview showed at the shutter moment. */
+data class CaptureSnapshot(val filter: Filter, val params: ParamValues, val analysis: FrameAnalysis,
+                           val mirror: Boolean, val rotationDeg: Int)
+
 /**
- * Dedicated GL thread: camera OES texture -> upright/cropped/(mirrored) RGBA frame FBO -> display (aspect-fit).
- * Task 5 inserts analysis + filter between the frame FBO and the display blit; Task 10 adds an encoder surface.
+ * Dedicated GL thread: camera OES texture -> upright/cropped/(mirrored) RGBA frame FBO -> analysis readback
+ * -> active filter into the filtered FBO (frame size) -> display (aspect-fit). Task 10 adds an encoder surface.
  */
 class RenderThread : HandlerThread("RenderThread") {
     /** Output mirrored horizontally (selfie style). Applied when drawing OES -> frame FBO. */
@@ -28,8 +37,23 @@ class RenderThread : HandlerThread("RenderThread") {
     /** Device orientation snapped to 0/90/180/270; consumed at shutter / record start (Task 9/10). */
     @Volatile var outputRotationDeg = 0
 
+    private class Selection(val filter: Filter, val params: ParamValues)
+    /** Written by the UI thread (setFilter), read once per frame on the GL thread. */
+    @Volatile private var selection = Selection(NoneFilter, ParamValues(NoneFilter.params))
+
+    /** Analysis of the last rendered frame. */
+    @Volatile var latestAnalysis: FrameAnalysis? = null
+        private set
+    /** Filter, params snapshot and analysis of the last rendered frame, published together. */
+    @Volatile private var lastRendered: CaptureSnapshot? = null
+
     private lateinit var handler: Handler
     private var egl: EglCore? = null
+    private var idleSurface: EGLSurface? = null
+    private lateinit var analysisReader: AnalysisReader
+    private val renderers = HashMap<Filter, FilterRenderer>()
+    private var analyzedFilter: Filter? = null
+    private var previous: FrameAnalysis? = null
     private lateinit var oesProgram: GlProgram
     private lateinit var blitProgram: GlProgram
 
@@ -40,6 +64,7 @@ class RenderThread : HandlerThread("RenderThread") {
     private var stream: CameraStream? = null
     private var quitting = false
     private var frame: GlUtil.Fbo? = null
+    private var filtered: GlUtil.Fbo? = null
 
     private val stMatrix = FloatArray(16)
     private val texMatrix = FloatArray(16)
@@ -55,11 +80,22 @@ class RenderThread : HandlerThread("RenderThread") {
     override fun onLooperPrepared() {
         handler = Handler(looper)
         val core = EglCore()
-        core.makeCurrent(EGL14.EGL_NO_SURFACE)
+        val idle = core.createOffscreenSurface(1, 1)
+        core.makeCurrent(idle)
+        idleSurface = idle
         egl = core
         oesProgram = GlProgram(VS, OES_FS)
-        blitProgram = GlProgram(VS, BLIT_FS)
+        blitProgram = GlProgram(GlUtil.QUAD_VS, GlUtil.COPY_FS)
+        analysisReader = AnalysisReader()
     }
+
+    /** UI thread. `params` is the live instance; it is snapshotted once per frame on the GL thread. */
+    fun setFilter(filter: Filter, params: ParamValues) {
+        selection = Selection(filter, params)
+    }
+
+    /** Null until the first frame has been rendered. Thread-safe. */
+    fun snapshotForCapture(): CaptureSnapshot? = lastRendered?.copy(rotationDeg = outputRotationDeg)
 
     /** Blocks until the GL thread is ready. */
     fun startAndWait(): RenderThread {
@@ -100,8 +136,14 @@ class RenderThread : HandlerThread("RenderThread") {
         stream?.let { releaseStream(it) }
         frame?.release()
         frame = null
+        filtered?.release()
+        filtered = null
+        renderers.values.forEach { it.release() }
+        renderers.clear()
+        analysisReader.release()
         oesProgram.release()
         blitProgram.release()
+        idleSurface?.let { egl?.releaseSurface(it) }
         egl?.release()
         egl = null
         quitSafely()
@@ -141,7 +183,7 @@ class RenderThread : HandlerThread("RenderThread") {
 
     private fun releaseDisplay() {
         val d = display ?: return
-        egl?.makeCurrent(EGL14.EGL_NO_SURFACE)
+        idleSurface?.let { egl?.makeCurrent(it) }
         egl?.releaseSurface(d)
         display = null
     }
@@ -178,12 +220,36 @@ class RenderThread : HandlerThread("RenderThread") {
         GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, s.tex)
         GLES30.glUniformMatrix4fv(oesProgram.uniform("uTexMatrix"), 1, false, texMatrix, 0)
         GLES30.glUniform1f(oesProgram.uniform("uFlipX"), flipX)
-        drawQuad(oesProgram)
+        GlUtil.drawQuad(oesProgram)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GlUtil.checkGlError("oes->frame")
 
-        // Task 5: analysis + filter pass go here (frame FBO -> filtered target).
+        applyFilter(f)
         drawDisplay()
+    }
+
+    /** frame -> analysis -> active filter -> filtered FBO; publishes the analysis for capture. */
+    private fun applyFilter(f: GlUtil.Fbo) {
+        val sel = selection
+        if (sel.filter !== analyzedFilter) {
+            analyzedFilter = sel.filter
+            previous = null
+        }
+        val params = sel.params.snapshot()
+        val luma = analysisReader.read(f.tex, f.width, f.height, ANALYSIS_WIDTH)
+        val analysis = sel.filter.analyze(luma, params, previous)
+        previous = analysis
+
+        val out = filtered?.takeIf { it.width == f.width && it.height == f.height } ?: run {
+            filtered?.release()
+            GlUtil.Fbo(f.width, f.height).also { filtered = it }
+        }
+        val renderer = renderers.getOrPut(sel.filter) { sel.filter.createRenderer().apply { init() } }
+        FilterPass.render(renderer, f.tex, out.id, out.width, out.height, params, analysis)
+        GlUtil.checkGlError("filter ${sel.filter.id}")
+
+        latestAnalysis = analysis
+        lastRendered = CaptureSnapshot(sel.filter, params, analysis, mirror, outputRotationDeg)
     }
 
     private fun drawDisplay() {
@@ -194,25 +260,16 @@ class RenderThread : HandlerThread("RenderThread") {
         GLES30.glViewport(0, 0, displayW, displayH)
         GLES30.glClearColor(0f, 0f, 0f, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        frame?.let { f ->
+        filtered?.let { f ->
             val r = GlUtil.aspectFit(f.width, f.height, displayW, displayH)
             GLES30.glViewport(r[0], r[1], r[2], r[3])
             blitProgram.use()
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, f.tex)
-            GLES30.glUniform1f(blitProgram.uniform("uFlipX"), 1f)
-            drawQuad(blitProgram)
+            GlUtil.drawQuad(blitProgram)
         }
         GlUtil.checkGlError("display blit")
         if (!core.swap(d)) Log.w(TAG, "eglSwapBuffers failed: 0x${Integer.toHexString(EGL14.eglGetError())}")
-    }
-
-    private fun drawQuad(p: GlProgram) {
-        val pos = p.attrib("aPos")
-        GLES30.glEnableVertexAttribArray(pos)
-        GLES30.glVertexAttribPointer(pos, 2, GLES30.GL_FLOAT, false, 0, GlUtil.QUAD)
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
-        GLES30.glDisableVertexAttribArray(pos)
     }
 
     private fun runSync(block: () -> Unit) {
@@ -229,6 +286,8 @@ class RenderThread : HandlerThread("RenderThread") {
 
     private companion object {
         const val TAG = "RenderThread"
+        /** Analysis readback width (ruling R7: ≤160). Task 11's governor may lower it. */
+        const val ANALYSIS_WIDTH = 160
 
         const val VS = """#version 300 es
 in vec2 aPos;
@@ -239,7 +298,6 @@ void main() {
     gl_Position = vec4(aPos.x * uFlipX, aPos.y, 0.0, 1.0);
 }"""
 
-        // uTexMatrix only used by the OES program.
         const val OES_FS = """#version 300 es
 #extension GL_OES_EGL_image_external_essl3 : require
 precision mediump float;
@@ -250,12 +308,5 @@ out vec4 outColor;
 void main() {
     outColor = vec4(texture(uTex, (uTexMatrix * vec4(vUv, 0.0, 1.0)).xy).rgb, 1.0);
 }"""
-
-        const val BLIT_FS = """#version 300 es
-precision mediump float;
-uniform sampler2D uTex;
-in vec2 vUv;
-out vec4 outColor;
-void main() { outColor = texture(uTex, vUv); }"""
     }
 }

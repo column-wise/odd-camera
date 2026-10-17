@@ -19,6 +19,7 @@ class EglCore {
         val attribs = intArrayOf(
             EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_NONE,
         )
@@ -42,7 +43,14 @@ class EglCore {
         return s
     }
 
-    /** Pass EGL14.EGL_NO_SURFACE to make the context current without a surface (surfaceless). */
+    /** Pbuffer surface: keeps the context current without a window (no reliance on surfaceless contexts). */
+    fun createOffscreenSurface(w: Int, h: Int): EGLSurface {
+        val s = EGL14.eglCreatePbufferSurface(display, config,
+            intArrayOf(EGL14.EGL_WIDTH, w, EGL14.EGL_HEIGHT, h, EGL14.EGL_NONE), 0)
+        check(s != null && s != EGL14.EGL_NO_SURFACE) { "eglCreatePbufferSurface failed: ${eglErr()}" }
+        return s
+    }
+
     fun makeCurrent(s: EGLSurface) {
         check(EGL14.eglMakeCurrent(display, s, s, context)) { "eglMakeCurrent failed: ${eglErr()}" }
     }
