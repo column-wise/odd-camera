@@ -223,7 +223,8 @@ class VideoEncoder(val config: EncoderConfig, private val pending: MediaSaver.Pe
         audio?.let { runCatching { it.stop() }; it.release() }
     }
 
-    private fun fail(t: Throwable) {
+    /** Marks the recording failed: stop() then aborts the row and throws. Any thread (e.g. the render thread's GL errors). */
+    fun fail(t: Throwable) {
         Log.e(TAG, "encoder error", t)
         if (error == null) error = t
     }

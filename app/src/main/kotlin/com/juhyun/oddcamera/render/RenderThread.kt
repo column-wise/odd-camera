@@ -73,6 +73,8 @@ class RenderThread : HandlerThread("RenderThread") {
     /** True between startRecording and stopRecording (Task 11 freezes its governor on it). */
     @Volatile var isRecording = false
         private set
+    /** Called on the GL thread after feeding `encoder` failed (already detached); the owner should stop() it. */
+    @Volatile var onRecordingError: (VideoEncoder) -> Unit = {}
 
     private var display: EGLSurface? = null
     private var displayW = 0
@@ -301,9 +303,11 @@ class RenderThread : HandlerThread("RenderThread") {
         recording?.let { r ->
             try {
                 drawEncoder(r, f, s.st.timestamp)
-            } catch (t: Throwable) { // a failing encoder must not take the preview down; stop() reports the file
+            } catch (t: Throwable) { // a failing encoder must not take the preview down
                 Log.e(TAG, "encoder frame failed; no longer feeding the encoder", t)
                 releaseRecording()
+                r.encoder.fail(t) // stop() aborts the row instead of saving a video that froze partway
+                onRecordingError(r.encoder)
             }
         }
     }

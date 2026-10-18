@@ -37,6 +37,29 @@ class VideoEncoderTest {
 
     @Test fun bufferInputFallbackEncodesFrames() = check(supported.first { !it.surfaceInput }, withAudio = false)
 
+    /** A failure reported mid-recording (e.g. the render thread's encoder swap failing) aborts the row; no frozen file. */
+    @Test fun failedRecordingAbortsRow() {
+        val pending = MediaSaver(resolver).beginVideo()
+        val enc = VideoEncoder(supported.first { it.surfaceInput }, pending, withAudio = false)
+        val egl = EglCore()
+        val surf = egl.createWindowSurface(enc.inputSurface()!!)
+        egl.makeCurrent(surf)
+        enc.start()
+        repeat(10) { i ->
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+            egl.setPresentationTime(surf, enc.framePtsNs((i + 1) * 33_333_333L))
+            egl.swap(surf)
+            Thread.sleep(33)
+        }
+        enc.fail(IllegalStateException("encoder eglSwapBuffers failed"))
+        val thrown = runCatching { runBlocking { enc.stop() } }.exceptionOrNull()
+        egl.releaseSurface(surf)
+        egl.release()
+        assertEquals("encoder eglSwapBuffers failed", thrown?.message)
+        val args = android.os.Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE) }
+        resolver.query(pending.uri, null, args, null)!!.use { assertEquals(0, it.count) }
+    }
+
     private fun check(config: EncoderConfig, withAudio: Boolean) {
         val uri = record(config, withAudio)
         try {

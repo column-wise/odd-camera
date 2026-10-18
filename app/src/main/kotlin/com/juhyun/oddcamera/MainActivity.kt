@@ -63,6 +63,10 @@ class MainActivity : ComponentActivity() {
         renderThread = RenderThread().startAndWait()
         camera = CameraController(this, this, renderThread)
         camera.onRebind = ::stopRecording // lens / mode switch
+        renderThread.onRecordingError = { failed ->
+            // stop() then aborts the row and shows "동영상 저장 실패"; stopRecording also resets the timer/shutter.
+            runOnUiThread { if (encoder === failed) stopRecording() }
+        }
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation != ORIENTATION_UNKNOWN) renderThread.outputRotationDeg = (orientation + 45) / 90 * 90 % 360
