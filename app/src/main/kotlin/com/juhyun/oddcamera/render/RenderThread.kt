@@ -56,6 +56,7 @@ class RenderThread : HandlerThread("RenderThread") {
     private lateinit var analysisReader: AnalysisReader
     private val renderers = HashMap<Filter, FilterRenderer>()
     private var analyzedFilter: Filter? = null
+    private var analyzedStream: CameraStream? = null
     private var previous: FrameAnalysis? = null
     private lateinit var oesProgram: GlProgram
     private lateinit var blitProgram: GlProgram
@@ -324,6 +325,10 @@ class RenderThread : HandlerThread("RenderThread") {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GlUtil.checkGlError("oes->frame")
 
+        if (s !== analyzedStream) { // lens / mode switch: tracking and masks from the old stream don't apply
+            analyzedStream = s
+            previous = null
+        }
         applyFilter(f, mirror, tier.analysisWidth)
         drawDisplay()
         recording?.let { r ->

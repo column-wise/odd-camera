@@ -106,14 +106,18 @@ object AsciiFilter : Filter {
         BoolParam("grayBackground", "배경 단순화", true),
     )
 
-    /** GL thread only (analyze / captureAnalysis / renderer release). Created lazily, dropped on renderer release. */
-    private var segmenter: PersonSegmenter? = null
-    private fun segmenter() = segmenter ?: PersonSegmenter().also { segmenter = it }
+    /**
+     * One per GL thread (analyze / captureAnalysis / renderer release all run there), created lazily and closed by that
+     * thread's renderer release: an old RenderThread shutting down (activity recreation) can't close a newer one's.
+     */
+    private val segmenters = ThreadLocal<PersonSegmenter?>()
+    private fun segmenter() = segmenters.get() ?: PersonSegmenter().also { segmenters.set(it) }
 
     override fun needsRgba(params: ParamValues) = params.string("region") == "person" && !params.bool("fullFrame")
 
     override fun analyze(frame: LumaFrame, params: ParamValues, previous: FrameAnalysis?): FrameAnalysis {
         val epoch = glyphEpoch(SystemClock.uptimeMillis())
+        if (previous == null) segmenters.get()?.clear() // new filter selection or camera stream: drop the old mask
         if (!needsRgba(params)) return AsciiAnalysis(percentileThreshold(frame.histogram, params.float("topPercent")), null, epoch)
         val seg = segmenter()
         frame.rgba?.let { seg.submit(it, frame.rgbaWidth, frame.rgbaHeight) }
@@ -231,8 +235,8 @@ object AsciiFilter : Filter {
             program.release()
             GLES30.glDeleteTextures(2, intArrayOf(atlas, maskTex), 0)
             uploaded = null
-            segmenter?.close()
-            segmenter = null
+            segmenters.get()?.close()
+            segmenters.remove()
         }
     }
 

@@ -43,6 +43,8 @@ class PersonSegmenter {
     private var still: Segmenter? = null
     @Volatile private var failed = false
     @Volatile private var warned = false
+    /** Bumped by [clear]: results of frames submitted before it are dropped. */
+    @Volatile private var generation = 0
     private val direct = Executor { it.run() } // listeners run on ML Kit's worker, never on the GL/main thread
 
     private fun client(single: Boolean): Segmenter? {
@@ -74,12 +76,13 @@ class PersonSegmenter {
     fun submit(rgba: ByteArray, w: Int, h: Int) {
         val c = client(single = false) ?: return
         if (!busy.compareAndSet(false, true)) return
+        val gen = generation
         try {
             val b = streamBitmap?.takeIf { it.width == w && it.height == h }
                 ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { streamBitmap = it }
             b.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
             c.process(InputImage.fromBitmap(b, 0))
-                .addOnSuccessListener(direct) { latest = toMask(it); busy.set(false) }
+                .addOnSuccessListener(direct) { if (gen == generation) latest = toMask(it); busy.set(false) }
                 .addOnFailureListener(direct) { warn(it); busy.set(false) }
         } catch (t: Throwable) { warn(t); busy.set(false) }
     }
@@ -90,6 +93,12 @@ class PersonSegmenter {
         return try {
             toMask(Tasks.await(c.process(InputImage.fromBitmap(bitmap(rgba, w, h), 0)), 1500, TimeUnit.MILLISECONDS))
         } catch (t: Throwable) { warn(t); null }
+    }
+
+    /** Forgets the current mask (e.g. the camera switched lenses); a frame still in flight is discarded too. */
+    fun clear() {
+        generation++
+        latest = null
     }
 
     fun close() {

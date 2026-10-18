@@ -40,10 +40,11 @@ object LightBoxesFilter : Filter {
         IntParam("maxBoxes", "최대 박스 수", 5, 150, 40),
     )
 
-    // Single tracker (ruling R5); analyze() runs on the GL thread only.
-    private val tracker = BoxTracker()
+    // One tracker per GL thread (ruling R5): an old RenderThread (activity recreation) can't disturb a newer one's.
+    private val trackers = ThreadLocal.withInitial { BoxTracker() }
 
     override fun analyze(frame: LumaFrame, params: ParamValues, previous: FrameAnalysis?): FrameAnalysis {
+        val tracker = trackers.get()
         if (previous == null) tracker.reset()
         val t = percentileThreshold(frame.histogram, params.float("topPercent"))
         if (t >= 256) {
