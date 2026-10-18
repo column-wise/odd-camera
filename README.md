@@ -8,6 +8,7 @@
   - **None**: 필터 없음
   - **Light Boxes**: 밝은 영역을 박스로 추적해 표시. 사진은 셔터를 누른 순간 화면에 있던 박스를 그대로 저장
   - **Ballad of You** (ASCII v2, 코드 id `ascii`): 영상을 문자로 렌더링. 영역은 ML Kit 사람 분할("사람") 또는 상위 N% 밝은 부분("밝은 부분")으로 선택, 문자 종류(프리셋/직접 입력)와 가로 문자 수 조절
+  - **Kaleidoscope**: 격자 칸마다 원본·오른쪽·아래·오른쪽 아래로 밀린 4개 반투명 사본을 겹침, 중앙일수록 많이 밀림, 칸 개수/최대 밀림/중앙 집중도 조절
 - 필터별 파라미터는 "필터 설정" 패널에서 바꾸며, 값은 필터마다 DataStore에 저장되어 다음 실행에도 유지됩니다.
 - 기본 카메라 기능: 사진(4:3) / 동영상(1080p 30fps, H.264 + AAC, 16:9), 플래시, 타이머, 전/후면 전환(전면은 미리보기와 동일하게 좌우 반전 저장), 1x/2x/5x 줌(초광각 지원 기기는 0.5x 포함) 및 핀치 줌, 탭 초점
 - 저장 위치: `DCIM/OddCamera` (MediaStore). 화면은 세로 고정이며 결과물 방향은 촬영/녹화 시작 시점의 기기 방향을 따릅니다.
@@ -56,7 +57,7 @@ val all: List<Filter> = listOf(NoneFilter, LightBoxesFilter, AsciiFilter, MyFilt
 `app/src/main/kotlin/com/juhyun/oddcamera/`
 
 - `camera/` CameraX 제어, 타이머
-- `filter/` `Filter`/`FilterParam`/`FilterRegistry`, 파라미터 저장, 필터별 구현 (`none`, `boxes`, `ascii`)
+- `filter/` `Filter`/`FilterParam`/`FilterRegistry`, 파라미터 저장, 필터별 구현 (`none`, `boxes`, `ascii`, `kaleidoscope`)
 - `render/` GL 렌더 스레드, 필터 패스, 분석 리더, 사진 렌더러, 성능 거버너
 - `gl/` EGL/셰이더 유틸
 - `record/` 동영상 인코더, 인코더 선택/폴백
