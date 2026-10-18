@@ -50,6 +50,9 @@ class CameraController(
 
     var flashMode = FlashMode.OFF
         private set
+    /** Whether the bound lens has a flash unit (most front cameras don't: flash is then forced off). */
+    private val _hasFlash = MutableStateFlow(true)
+    val hasFlash: StateFlow<Boolean> = _hasFlash
 
     /** Bound only in photo mode (same UseCaseGroup/ViewPort as the preview); null in video mode. */
     var imageCapture: ImageCapture? = null
@@ -163,6 +166,7 @@ class CameraController(
         renderThread.mirror = lens == CameraSelector.LENS_FACING_FRONT
         camera = c
         imageCapture = capture
+        _hasFlash.value = c.cameraInfo.hasFlashUnit()
         applyFlash()
         this.lens = lens
         this.aspect = aspect

@@ -91,6 +91,7 @@ fun CameraScreen(
     val recordingSince by vm.recordingSince.collectAsState()
     val zoom by camera.zoomRatio.collectAsState()
     val zoomRange by camera.zoomRange.collectAsState()
+    val hasFlash by camera.hasFlash.collectAsState()
     var panelOpen by remember { mutableStateOf(false) }
     val filter = vm.filters[index]
 
@@ -120,7 +121,9 @@ fun CameraScreen(
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     if (mode == CaptureMode.PHOTO) {
-                        Control(when (flash) { FlashMode.OFF -> "플래시 끔"; FlashMode.AUTO -> "플래시 자동"; FlashMode.ON -> "플래시 켬" }) { vm.cycleFlash() }
+                        // No flash unit (front camera): greyed out and shown off, since capture forces it off.
+                        Control(if (!hasFlash) "플래시 끔" else when (flash) { FlashMode.OFF -> "플래시 끔"; FlashMode.AUTO -> "플래시 자동"; FlashMode.ON -> "플래시 켬" },
+                            enabled = hasFlash) { vm.cycleFlash() }
                     } else {
                         Control(if (torch) "토치 켬" else "토치 끔") { vm.torch.value = !torch; camera.setTorch(!torch) }
                     }
@@ -184,8 +187,10 @@ private fun RecordingTime(since: Long, modifier: Modifier) {
 }
 
 @Composable
-private fun Control(text: String, selected: Boolean = false, onClick: () -> Unit) {
-    TextButton(onClick) { Text(text, color = if (selected) Color(0xFFFFD54F) else Color.White) }
+private fun Control(text: String, selected: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    TextButton(onClick, enabled = enabled) {
+        Text(text, color = when { !enabled -> Color.Gray; selected -> Color(0xFFFFD54F); else -> Color.White })
+    }
 }
 
 @Composable
