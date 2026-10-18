@@ -37,13 +37,13 @@ class PhotoMatchesPreviewTest {
 
     @After fun tearDown() { photo.release(); egl.release() }
 
-    /** 360×270 image-order scene: x/y gradient (asymmetric) plus three bright "lamps". */
+    /** 270×360 image-order scene (portrait, like the preview frame): x/y gradient (asymmetric) plus three bright "lamps". */
     private fun scene(): Bitmap {
         val px = IntArray(W * H) { i ->
             val x = i % W; val y = i / W
-            val lamp = (x in 40 until 64 && y in 30 until 50) || (x in 250 until 280 && y in 180 until 204) ||
-                (x in 300 until 310 && y in 40 until 50)
-            if (lamp) Color.WHITE else Color.rgb(20 + x / 3, 30 + y / 3, 90)
+            val lamp = (y in 40 until 64 && x in 30 until 50) || (y in 250 until 280 && x in 180 until 204) ||
+                (y in 300 until 310 && x in 40 until 50)
+            if (lamp) Color.WHITE else Color.rgb(20 + y / 3, 30 + x / 3, 90)
         }
         return Bitmap.createBitmap(px, W, H, Bitmap.Config.ARGB_8888)
     }
@@ -151,6 +151,42 @@ class PhotoMatchesPreviewTest {
         }
     }
 
+    /**
+     * Landscape captures of the portrait preview: ASCII cells must keep their size relative to the frame's SHORT side
+     * (the preview's width), not grow with the rotated output's long width. Uniform gray + full frame = one glyph in
+     * every cell, so the column-brightness profile repeats every cell.
+     */
+    @Test fun asciiCellSizeFollowsTheShortSideWhenRotated() {
+        for (rot in listOf(0, 90, 270)) {
+            val r = AsciiFilter.createRenderer().apply { init() }
+            val gray = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.rgb(128, 128, 128)) }
+            val params = ParamValues(AsciiFilter.params).apply { set("fullFrame", true); set("glyphSet", "classic"); set("columns", 45) }
+            val p = preview(AsciiFilter, r, gray, params)
+            val shot = photo.render(Bitmap.createScaledBitmap(gray, W * 4, H * 4, false),
+                CaptureSnapshot(AsciiFilter, p.params, p.analysis, false, rot), r)
+            r.release()
+            val pp = period(p.image); val ps = period(shot)
+            val expected = pp * minOf(shot.width, shot.height) / minOf(W, H)
+            assertTrue("rot=$rot cell ${ps}px in ${shot.width}x${shot.height}, preview ${pp}px in ${W}x$H -> expected ${expected}px",
+                Math.abs(ps - expected) <= 1)
+        }
+    }
+
+    /** Period (px) of the column-brightness profile: the first autocorrelation peak after the first trough. */
+    private fun period(b: Bitmap): Int {
+        val px = b.pixels()
+        val prof = DoubleArray(b.width) { x -> (0 until b.height).sumOf { y -> Color.green(px[y * b.width + x]).toDouble() } }
+        val mean = prof.average()
+        val d = prof.map { it - mean }
+        fun corr(l: Int) = (0 until d.size - l).sumOf { d[it] * d[it + l] } / (d.size - l)
+        val c0 = corr(0)
+        var l = 1
+        while (corr(l) > 0.0) l++
+        while (corr(l) < 0.8 * c0) l++
+        while (corr(l + 1) > corr(l)) l++
+        return l
+    }
+
     /** Box-downscale to 90 px wide, RGB average. */
     private fun down90(b: Bitmap): DoubleArray {
         val px = b.pixels(); val f = b.width / 90; val h = b.height / f
@@ -165,5 +201,5 @@ class PhotoMatchesPreviewTest {
         }
     }
 
-    private companion object { const val W = 360; const val H = 270 }
+    private companion object { const val W = 270; const val H = 360 }
 }

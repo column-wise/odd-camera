@@ -75,8 +75,9 @@ object LightBoxesFilter : Filter {
             val need = boxes.size * RECTS_PER_BOX * FLOATS_PER_RECT
             if (buf.capacity() < need) buf = ByteBuffer.allocateDirect(need * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
             buf.clear()
-            val lw = maxOf(1f, 0.0025f * w)
-            val m = 0.006f * w
+            val short = minOf(w, h) // the portrait preview's width; also the short side of a rotated capture
+            val lw = maxOf(1f, 0.0025f * short)
+            val m = 0.006f * short
             // Pixel rect, y measured from the frame TOP (Box convention) -> clip space (GL y is up).
             fun rect(x: Float, y: Float, rw: Float, rh: Float) {
                 val x0 = x / w * 2 - 1; val x1 = (x + rw) / w * 2 - 1

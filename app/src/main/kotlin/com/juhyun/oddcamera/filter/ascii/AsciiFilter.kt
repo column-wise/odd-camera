@@ -216,7 +216,8 @@ object AsciiFilter : Filter {
             GLES30.glUniform1i(program.uniform("uAtlas"), 1)
             GLES30.glUniform1i(program.uniform("uMask"), 2)
             GLES30.glUniform2f(program.uniform("uSize"), w.toFloat(), h.toFloat())
-            GLES30.glUniform1f(program.uniform("uCell"), w.toFloat() / params.int("columns"))
+            // Short side: the portrait preview's width, which stays the short side of a landscape (rotated) capture.
+            GLES30.glUniform1f(program.uniform("uCell"), minOf(w, h).toFloat() / params.int("columns"))
             GLES30.glUniform1i(program.uniform("uThreshold"), analysis.threshold)
             GLES30.glUniform1i(program.uniform("uRamp"), ramp.size)
             GLES30.glUniform1i(program.uniform("uMode"), mode)
@@ -238,11 +239,11 @@ object AsciiFilter : Filter {
     /** Atlas cell size in px (square). */
     private const val CELL = 64
 
-    // Cells are square, w / columns px, counted from the frame's top-left (GL y is up, so flip).
+    // Cells are square, min(w, h) / columns px (preview: columns across its width), counted from the frame's top-left (GL y is up, so flip).
     // Cell luma = average of 4 taps inside the cell. uMode 0 = full frame (glyphIndex() above with threshold -1),
     // 1 = bright cells (luma > threshold), 2 = person cells (mask at the cell centre > 0.5).
     // Region cells: white + red glyph ramp[1 + glyphFor()]. Outside: posterized gray (uGray) or src, then the glow.
-    // Posterize: 3×3 box blur of luma with taps w / 180 px apart (resolution-independent) -> floor(l / 64) * 64 + 32,
+    // Posterize: 3×3 box blur of luma with taps min(w, h) / 180 px apart (resolution-independent) -> floor(l / 64) * 64 + 32,
     // i.e. flat 32/96/160/224 bands. Glow (person mode): white fading over 1 glyph cell from the nearest neighbouring
     // region cell (binarized mask), so low-confidence areas never glow.
     // uMask t = 0 is the frame top.
@@ -303,7 +304,7 @@ void main() {
     }
     vec3 base = texture(uTex, vUv).rgb;
     if (uGray) {
-        float r = uSize.x / 180.0;
+        float r = min(uSize.x, uSize.y) / 180.0;
         vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y);
         vec3 s = vec3(0.0);
         for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) s += srcTop(p + vec2(i, j) * r);
