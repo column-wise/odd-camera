@@ -138,8 +138,8 @@ class CameraController(
         val preview = Preview.Builder()
             .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(strategy).build())
             .setTargetRotation(Surface.ROTATION_0)
-            // Video is 30 fps: a steady camera rate keeps frame spacing even (CameraX picks the closest range).
-            .apply { if (aspect == Aspect.VIDEO_16_9) setTargetFrameRate(Range(30, 30)) }
+            // Lock ~30 fps in both modes: otherwise photo-mode AE drops the preview to 15 fps in dim light (CameraX picks the closest supported range).
+            .setTargetFrameRate(Range(30, 30))
             .build()
         preview.setSurfaceProvider(renderThread.cameraSurfaceProvider())
         // ~12 MP still (R14): capped so 50-200 MP sensors never feed the multi-bitmap photo pipeline.
