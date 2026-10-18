@@ -46,6 +46,9 @@ class ParamValues(private val defs: List<FilterParam>) {
 
     @Synchronized fun snapshot(): ParamValues = ParamValues(defs).also { it.values.putAll(values) }
 
+    /** Fresh values at every default. */
+    fun defaults() = ParamValues(defs)
+
     @Synchronized fun toStringMap(): Map<String, String> = values.mapValues { it.value.toString() }
 
     @Synchronized fun loadFrom(map: Map<String, String>) {

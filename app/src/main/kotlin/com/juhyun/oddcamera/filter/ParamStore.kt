@@ -14,9 +14,13 @@ class ParamStore(private val dataStore: DataStore<Preferences>) {
         return ParamValues(filter.params).apply { loadFrom(saved) }
     }
 
+    /** Stores only values that differ from their defaults, so a later change of a default reaches every user. */
     suspend fun save(filterId: String, values: ParamValues) {
         val map = values.toStringMap()
-        dataStore.edit { prefs -> map.forEach { (k, v) -> prefs[key(filterId, k)] = v } }
+        val defaults = values.defaults().toStringMap()
+        dataStore.edit { prefs ->
+            map.forEach { (k, v) -> if (v == defaults[k]) prefs.remove(key(filterId, k)) else prefs[key(filterId, k)] = v }
+        }
     }
 
     private fun key(filterId: String, paramKey: String) = stringPreferencesKey("$filterId.$paramKey")

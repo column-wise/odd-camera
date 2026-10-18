@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okio.FileSystem
 import okio.Path
@@ -42,5 +43,21 @@ class ParamStoreTest {
         assertEquals(10, boxes.int("maxBoxes"))
         assertEquals(3f, boxes.float("topPercent")) // untouched default; ASCII's topPercent didn't leak in
         job2.cancelAndJoin()
+    }
+
+    /** Only non-defaults are stored, so a changed default still reaches users who once touched another slider. */
+    @Test fun defaultsAreNotPersisted() = runBlocking {
+        val path = tmp.root.resolve("params.preferences_pb").toOkioPath()
+        val job = SupervisorJob()
+        val ds = PreferenceDataStoreFactory.create(
+            OkioStorage(FileSystem.SYSTEM, PreferencesSerializer) { path }, scope = CoroutineScope(Dispatchers.IO + job))
+        val store = ParamStore(ds)
+        val v = store.load(AsciiFilter).apply { set("columns", 90) }
+        store.save(AsciiFilter.id, v)
+        assertEquals(setOf("ascii.columns"), ds.data.first().asMap().keys.map { it.name }.toSet())
+        v.set("columns", 60) // back to the default: the key goes away
+        store.save(AsciiFilter.id, v)
+        assertEquals(emptySet<String>(), ds.data.first().asMap().keys.map { it.name }.toSet())
+        job.cancelAndJoin()
     }
 }
