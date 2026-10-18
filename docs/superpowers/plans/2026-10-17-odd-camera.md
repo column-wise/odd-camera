@@ -27,7 +27,7 @@
 - Adding a filter = new `Filter` implementation + one registry line; no camera/record/save code changes.
 - Must run on other Android phones, not only the S26 Ultra: performance degradation tiers + encoder fallback.
 - Activity locked to portrait; output orientation follows device orientation (via `OrientationEventListener`) at shutter / recording start. (Claude's call.)
-- No 4K, manual exposure, HDR, RAW, in-app gallery, ML segmentation.
+- No 4K, manual exposure, HDR, RAW, in-app gallery. (ML person segmentation allowed for ASCII v2, Task 13.)
 
 ## Review Focus
 
@@ -350,3 +350,23 @@ Box geometry (Task 3): `data class Box(val x: Float, val y: Float, val w: Float,
 - [ ] **Step 3:** Full `./gradlew :app:testDebugUnitTest :app:connectedDebugAndroidTest` → all PASS.
 - [ ] **Step 4:** README (Korean): what the app is, build/install commands (incl. `JAVA_HOME` note), how to add a filter (implement `Filter`, add to `FilterRegistry`).
 - [ ] **Step 5:** Commit `docs: readme` and push.
+
+### Task 13: ASCII v2 — person segmentation look (added 2026-10-18, runs before Task 12)
+
+**Files:** Modify `filter/ascii/AsciiFilter.kt`, `filter/Filter.kt`, `render/AnalysisReader.kt`, `render/RenderThread.kt`, `render/PhotoRenderer.kt` (only if the still path needs RGBA), `gradle/libs.versions.toml`, `app/build.gradle.kts`; Create `filter/ascii/PersonSegmenter.kt`; Tests `test/.../ascii/AsciiV2Test.kt`, `androidTest/.../AsciiRenderTest.kt` (update)
+
+**Spec:** ASCII section "v2" in the design doc.
+
+**Interfaces:**
+- `LumaFrame` gains `rgba: ByteArray?` (null unless requested) — RGBA readback of the same analysis frame at `segWidth` (256 px wide, aspect kept). `Filter` gains `val needsRgba: Boolean get() = false`; RenderThread/PhotoRenderer request RGBA only when the active filter needs it. No other filter changes.
+- `class PersonSegmenter` wraps ML Kit `segmentation-selfie` (stream mode for preview, single-image mode for stills): `fun submit(rgba, w, h, rotation=0)` non-blocking, drops input while busy; `val latest: Mask?` where `class Mask(val data: ByteArray /*0..255*/, val w: Int, val h: Int)`; `fun segmentBlocking(rgba, w, h): Mask?` for stills (timeout 1500 ms → null).
+- `class AsciiAnalysis(override val threshold: Int, val mask: Mask?, val glyphEpoch: Int) : FrameAnalysis, RotatableAnalysis` — `rotated()` rotates the mask array.
+- Params (ids stable; labels Korean): `ChoiceParam("region","영역 기준",[person 사람, bright 밝은 부분],"person")`, existing `topPercent` (bright mode only), `columns`, `fullFrame`, `glyphSet` presets now `symbols "#%@=+*$&"` (label 기호, new default), `classic`, `dots`, `blocks`, `binary`, `custom`; `BoolParam("grayBackground","배경 흑백",true)`.
+- Pure: `fun glyphFor(cellX: Int, cellY: Int, epoch: Int, setSize: Int): Int` — deterministic hash; ≈10 % of cells change when epoch increments; `fun glyphEpoch(timeMs: Long): Int = (timeMs / 250).toInt()`.
+- Shader (mask mode): cell in-region if mask at cell center > 0.5 → white bg `#FFFFFF` + glyph `#D0141E`; outside: if grayBackground → luma×0.8 gray else src; edge glow: outside pixels blend toward white by `smoothstep(0.15, 0.5, maskBilinear)`. Bright mode uses the same look with the region = cells whose luma > threshold. Full-frame unchanged.
+- Photo: `captureAnalysis` (person mode) runs `segmentBlocking` on the still's RGBA; null → keep snapshot mask. Bright mode keeps R13 behavior. Video uses per-frame analysis (R18).
+
+- [ ] **Step 1:** JVM tests: `glyphFor` deterministic, in range, ~5–20 % cells differ between consecutive epochs, 0 % within an epoch; mask rotation 90/180/270 maps corners correctly; region param defaults to person; resolve glyph set for `symbols`.
+- [ ] **Step 2:** Device test (AsciiRenderTest): inject an `AsciiAnalysis` with a synthetic mask (left half 255) → left-half cells contain red+white only, right half gray (R≈G≈B) when grayBackground, equals src when off; orientation-sensitive; 2-width comparison holds.
+- [ ] **Step 3:** FAIL → implement → PASS. Device manual: point at a person (or the user) → silhouette filled; screencaps.
+- [ ] **Step 4:** Commit `feat: ascii v2 person segmentation`.

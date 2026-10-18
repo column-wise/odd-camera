@@ -34,7 +34,7 @@ Must work well on **other Android phones too**, not only the dev device. So the 
 - In-app gallery/viewer, editing, sharing.
 - 4K recording, manual exposure/ISO/shutter, HDR, night mode, RAW.
 - Applying filters to existing photos/videos.
-- Person segmentation (ML). Masks are brightness-based.
+- (Removed 2026-10-18: person segmentation is now used by the ASCII filter.)
 
 ## Filters
 
@@ -48,10 +48,16 @@ Reference behaviour was prototyped in a browser demo (`.superpowers` scratch, no
 - **Threshold is relative by default**: "brightest top N % of the frame" so it adapts to scene exposure. An absolute-brightness mode may also be offered.
 - User controls: brightness threshold, max number of boxes.
 
-### ASCII (from clip 2)
-- Divide the frame into a grid of cells. Cells brighter than the threshold become a light background with a dark character chosen by brightness; cells below threshold show the original image.
-- Also a **full-frame** variant (whole image as characters) behind a toggle.
-- User controls: brightness threshold (same relative scheme), cell size, full-frame toggle, **glyph set** (user request): choose which characters are drawn, in the same settings panel as the threshold. Presets plus a custom string the user types.
+### ASCII (from clip 2) — v2, revised 2026-10-18 after user feedback
+Reference: `workspace/KakaoTalk_20261018_130553708.mp4` (a fan recreation of the stage effect). User decision: the glyph region follows **people** (on-device ML person segmentation), not brightness.
+- **Region**: on-device person segmentation (ML Kit selfie segmentation, stream mode; works for any visible people, no network). Setting "영역 기준" = 사람 (default) / 밝은 부분 (old brightness rule, relative top-N % threshold) so scenes without people still have an option.
+- **Glyphs**: every in-region cell gets a symbol picked pseudo-randomly per cell from the glyph set (no blanks, no brightness ramp); default set `#%@=+*$&` ("기호"). Symbols are stable per cell with a small fraction re-rolling a few times per second. Glyph set choice (presets + custom string) stays.
+- **Color**: white cell background, all glyphs one red.
+- **Outside region**: grayscale and slightly darkened (toggle "배경 흑백", default on).
+- **Edge**: soft feathered white glow at the silhouette edge.
+- **Full-frame** toggle remains (whole image as brightness-ramped glyphs, as before).
+- **Capture**: photos re-run segmentation on the still (exposure/resolution-correct mask); video uses the per-frame preview mask. Glyph re-roll state is part of the analysis so captures match the preview moment.
+- User controls: region mode, brightness threshold (bright mode), columns, full-frame, glyph set, background grayscale.
 
 ### Settings persistence (user request)
 Every filter's parameter values are **saved per filter** and restored on next launch; changing ASCII settings never affects Light Boxes and vice versa.
