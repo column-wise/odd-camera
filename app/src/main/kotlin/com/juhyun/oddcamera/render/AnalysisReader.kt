@@ -54,8 +54,8 @@ class AnalysisReader {
         // Max-pool: each analysis pixel = brightest texel (exact texelFetch) of the frame block it covers, so a
         // 1-2 px lamp never vanishes or blinks with sub-pixel shake (bilinear/averaging would dim it).
         // Output row y (FBO bottom = readPixels row 0) covers the frame's y-th block from the TOP.
-        // ponytail: per-axis cap of 16 taps (frame ≤ 16× analysis width, e.g. 2560→160); beyond that the
-        // block is strided and a 1 px lamp can be skipped — raise MAX_TAPS if frames grow.
+        // ponytail: per-axis cap of 32 taps (frame ≤ 32× analysis width; lowest tier 1080→80 is 13.5×);
+        // beyond that the block is strided and a 1 px lamp can be skipped. Early break keeps normal tiers cheap.
         const val LUMA_FS = """#version 300 es
 precision highp float;
 precision highp int;
@@ -63,7 +63,7 @@ uniform sampler2D uTex;
 uniform ivec2 uSrc;
 uniform ivec2 uDst;
 out vec4 outColor;
-const int MAX_TAPS = 16;
+const int MAX_TAPS = 32;
 void main() {
     ivec2 o = ivec2(gl_FragCoord.xy);
     ivec2 lo = o * uSrc / uDst;

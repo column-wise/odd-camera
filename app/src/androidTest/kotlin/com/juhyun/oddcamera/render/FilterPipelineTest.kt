@@ -70,6 +70,25 @@ class FilterPipelineTest {
         reader.release()
     }
 
+    /** Lowest tier: 1440x1080 -> 80 gives 18x13.5 blocks (> the old 16-tap cap). A 2x2 lamp must still never vanish. */
+    @Test fun smallBrightDotSurvivesLowestTierBlocks() {
+        val reader = AnalysisReader()
+        val dotTex = GlUtil.createTexture(GLES30.GL_TEXTURE_2D)
+        val white = Paint().apply { color = Color.WHITE }
+        for (dy in 0 until 14 step 3) for (dx in 0 until 18 step 3) {
+            val bmp = Bitmap.createBitmap(1440, 1080, Bitmap.Config.ARGB_8888).apply {
+                eraseColor(Color.BLACK)
+                Canvas(this).drawRect(720f + dx, 540f + dy, 722f + dx, 542f + dy, white)
+            }
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, dotTex)
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bmp, 0)
+            bmp.recycle()
+            val top = reader.read(dotTex, 1440, 1080, 80).histogram[255]
+            assertTrue("dot at +$dx,+$dy: top bin $top", top in 1..4)
+        }
+        reader.release()
+    }
+
     @Test fun noneFilterCopiesSource() {
         val params = ParamValues(NoneFilter.params)
         val analysis = NoneFilter.analyze(AnalysisReader().read(tex, W, H, 160), params, null)

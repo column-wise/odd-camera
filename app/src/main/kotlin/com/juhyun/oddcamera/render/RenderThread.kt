@@ -85,6 +85,12 @@ class RenderThread : HandlerThread("RenderThread") {
     /** Every stream not yet released, incl. replaced ones still awaiting CameraX's release callback. */
     private val liveStreams = ArrayList<CameraStream>()
     private var quitting = false
+    private val governor = PerfGovernor()
+    /** Debug knob (`setprop debug.oddcamera.tier N`, polled once a second); -1 = governor decides. */
+    private var forcedTier = -1
+    private var perfStartNs = 0L
+    private var perfFrames = 0
+    private var perfSumMs = 0f
     private var frame: GlUtil.Fbo? = null
     private var filtered: GlUtil.Fbo? = null
 
@@ -141,6 +147,7 @@ class RenderThread : HandlerThread("RenderThread") {
             val surface = encoder.inputSurface()?.let { core.createWindowSurface(it) }
             recording = Recording(encoder, Math.floorMod(rotationDeg, 360), surface, c.width, c.height)
             isRecording = true
+            governor.freeze(true)
         } ?: error("render thread gone")
     }
 
@@ -153,6 +160,7 @@ class RenderThread : HandlerThread("RenderThread") {
         val r = recording ?: return
         recording = null
         isRecording = false
+        governor.freeze(false)
         idleSurface?.let { egl?.makeCurrent(it) }
         r.surface?.let { egl?.releaseSurface(it) }
         r.rotFbo?.release()
@@ -231,7 +239,7 @@ class RenderThread : HandlerThread("RenderThread") {
         val s = CameraStream(tex, st, Surface(st), size.width, size.height)
         stream = s // a previous stream stays alive until its own result callback below
         liveStreams += s
-        st.setOnFrameAvailableListener({ if (stream === s) onFrame(s) }, handler)
+        st.setOnFrameAvailableListener({ if (stream === s) timedFrame(s) }, handler)
         request.setTransformationInfoListener({ handler.post(it) }) { info ->
             s.crop = info.cropRect
             s.rotationDeg = info.rotationDegrees
@@ -261,6 +269,32 @@ class RenderThread : HandlerThread("RenderThread") {
         display = null
     }
 
+    /** Frame time = onFrameAvailable entry to the last swap's return (CPU wall time), fed to the governor + 1 Hz log. */
+    private fun timedFrame(s: CameraStream) {
+        val t0 = System.nanoTime()
+        onFrame(s)
+        val t1 = System.nanoTime()
+        val ms = (t1 - t0) / 1e6f
+        governor.onFrame(ms)
+        perfFrames++
+        perfSumMs += ms
+        if (perfStartNs == 0L) perfStartNs = t0
+        if (t1 - perfStartNs >= 1_000_000_000L) {
+            forcedTier = debugTierProperty()
+            Log.i(PERF_TAG, "fps=%.1f avgMs=%.1f tier=%d%s".format(perfFrames * 1e9f / (t1 - perfStartNs),
+                perfSumMs / perfFrames, activeTierIndex(), if (isRecording) " rec" else ""))
+            perfStartNs = t1; perfFrames = 0; perfSumMs = 0f
+        }
+    }
+
+    private fun activeTierIndex() = if (forcedTier in PerfGovernor.DEFAULT_TIERS.indices) forcedTier else governor.index
+
+    // ponytail: hidden-API reflection; returns -1 if blocked. Replace with a BuildConfig-gated hook if it breaks.
+    private fun debugTierProperty(): Int = try {
+        Class.forName("android.os.SystemProperties").getMethod("getInt", String::class.java, Int::class.javaPrimitiveType)
+            .invoke(null, "debug.oddcamera.tier", -1) as Int
+    } catch (_: Throwable) { -1 }
+
     private fun onFrame(s: CameraStream) {
         if (egl == null) return
         val mirror = mirror // read once: the OES pass and the capture snapshot must agree
@@ -269,9 +303,12 @@ class RenderThread : HandlerThread("RenderThread") {
 
         // Upright size = crop rotated by the sensor->natural rotation (portrait-locked activity).
         val swap = s.rotationDeg % 180 != 0
-        val fw = if (swap) s.crop.height() else s.crop.width()
-        val fh = if (swap) s.crop.width() else s.crop.height()
-        if (fw <= 0 || fh <= 0) return
+        val cw = if (swap) s.crop.height() else s.crop.width()
+        val ch = if (swap) s.crop.width() else s.crop.height()
+        if (cw <= 0 || ch <= 0) return
+        val tier = PerfGovernor.DEFAULT_TIERS[activeTierIndex()]
+        val fw = scaled(cw, tier.processScale)
+        val fh = scaled(ch, tier.processScale)
         val f = frame?.takeIf { it.width == fw && it.height == fh } ?: run {
             frame?.release()
             GlUtil.Fbo(fw, fh).also { frame = it }
@@ -298,7 +335,7 @@ class RenderThread : HandlerThread("RenderThread") {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GlUtil.checkGlError("oes->frame")
 
-        applyFilter(f, mirror)
+        applyFilter(f, mirror, tier.analysisWidth)
         drawDisplay()
         recording?.let { r ->
             try {
@@ -373,14 +410,14 @@ class RenderThread : HandlerThread("RenderThread") {
     }
 
     /** frame -> analysis -> active filter -> filtered FBO; publishes the analysis for capture. */
-    private fun applyFilter(f: GlUtil.Fbo, mirror: Boolean) {
+    private fun applyFilter(f: GlUtil.Fbo, mirror: Boolean, analysisWidth: Int) {
         val sel = selection
         if (sel.filter !== analyzedFilter) {
             analyzedFilter = sel.filter
             previous = null
         }
         val params = sel.params.snapshot()
-        val luma = analysisReader.read(f.tex, f.width, f.height, ANALYSIS_WIDTH)
+        val luma = analysisReader.read(f.tex, f.width, f.height, analysisWidth)
         val analysis = sel.filter.analyze(luma, params, previous)
         previous = analysis
 
@@ -430,7 +467,10 @@ class RenderThread : HandlerThread("RenderThread") {
 
     companion object {
         private const val TAG = "RenderThread"
-        /** Analysis readback width (ruling R7: ≤160). Task 11's governor may lower it. Photo analysis uses it too. */
+        private const val PERF_TAG = "OddPerf"
+        /** Even, >= 2. */
+        private fun scaled(v: Int, scale: Float) = maxOf(2, Math.round(v * scale / 2f) * 2)
+        /** Full analysis width (ruling R7: ≤160); the governor lowers the preview's. Photo analysis always uses this. */
         const val ANALYSIS_WIDTH = 160
 
         private const val VS = """#version 300 es
