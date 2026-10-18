@@ -3,6 +3,7 @@ package com.juhyun.oddcamera.camera
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.util.Log
+import android.util.Range
 import android.util.Rational
 import android.view.Display
 import android.view.Surface
@@ -54,6 +55,9 @@ class CameraController(
     var imageCapture: ImageCapture? = null
         private set
 
+    /** Called before every (re)bind, i.e. lens and mode switches: a recording must stop and finalize first. */
+    var onRebind: () -> Unit = {}
+
     /** User-facing bind failure messages (Korean). */
     private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val errors: SharedFlow<String> = _errors
@@ -103,6 +107,7 @@ class CameraController(
     }
 
     private fun bind(lens: Int, aspect: Aspect) {
+        onRebind()
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             val provider = future.get()
@@ -133,6 +138,8 @@ class CameraController(
         val preview = Preview.Builder()
             .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(strategy).build())
             .setTargetRotation(Surface.ROTATION_0)
+            // Video is 30 fps: a steady camera rate keeps frame spacing even (CameraX picks the closest range).
+            .apply { if (aspect == Aspect.VIDEO_16_9) setTargetFrameRate(Range(30, 30)) }
             .build()
         preview.setSurfaceProvider(renderThread.cameraSurfaceProvider())
         // ~12 MP still (R14): capped so 50-200 MP sensors never feed the multi-bitmap photo pipeline.

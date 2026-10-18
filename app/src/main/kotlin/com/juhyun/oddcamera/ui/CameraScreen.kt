@@ -2,6 +2,7 @@ package com.juhyun.oddcamera.ui
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.os.SystemClock
 import android.util.Size
 import android.widget.Toast
 import androidx.compose.foundation.Image
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -62,6 +64,7 @@ import com.juhyun.oddcamera.filter.ParamValues
 import com.juhyun.oddcamera.filter.TextParam
 import com.juhyun.oddcamera.render.RenderThread
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -74,8 +77,7 @@ fun CameraScreen(
     vm: CameraViewModel,
     camera: CameraController,
     renderThread: RenderThread,
-    onCapturePhoto: () -> Unit,
-    onToggleRecording: () -> Unit,
+    onShutter: () -> Unit,
     preview: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
@@ -86,6 +88,7 @@ fun CameraScreen(
     val timerSeconds by vm.timerSeconds.collectAsState()
     val countdown by vm.countdown.collectAsState()
     val capturing by vm.capturing.collectAsState()
+    val recordingSince by vm.recordingSince.collectAsState()
     val zoom by camera.zoomRatio.collectAsState()
     val zoomRange by camera.zoomRange.collectAsState()
     var panelOpen by remember { mutableStateOf(false) }
@@ -109,6 +112,7 @@ fun CameraScreen(
                 onZoom = { camera.setZoomRatio(camera.zoomRatio.value * it) },
                 onFocus = camera::focusAt,
             )
+            recordingSince?.let { RecordingTime(it, Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(top = 56.dp)) }
             if (countdown > 0) {
                 Text("$countdown", color = Color.White, fontSize = 120.sp, modifier = Modifier.align(Alignment.Center))
             }
@@ -139,10 +143,17 @@ fun CameraScreen(
                     LastCaptureThumbnail(vm)
                     Box(
                         Modifier.size(72.dp).clip(CircleShape)
-                            .background(if (mode == CaptureMode.VIDEO) Color(0xFFE53935) else if (capturing) Color.Gray else Color.White)
+                            .background(if (capturing) Color.Gray else Color.White)
                             .border(4.dp, Color.Gray, CircleShape)
-                            .clickable { vm.shutter(onCapturePhoto, onToggleRecording) },
-                    )
+                            .clickable(onClick = onShutter),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        // Video: red dot to start, red square while recording.
+                        if (mode == CaptureMode.VIDEO) Box(
+                            if (recordingSince != null) Modifier.size(28.dp).clip(RoundedCornerShape(4.dp)).background(RED)
+                            else Modifier.size(56.dp).clip(CircleShape).background(RED),
+                        )
+                    }
                     Column {
                         Control("사진", selected = mode == CaptureMode.PHOTO) { vm.setMode(CaptureMode.PHOTO) }
                         Control("동영상", selected = mode == CaptureMode.VIDEO) { vm.setMode(CaptureMode.VIDEO) }
@@ -150,6 +161,25 @@ fun CameraScreen(
                 }
             }
         }
+    }
+}
+
+private val RED = Color(0xFFE53935)
+
+/** Red dot + elapsed mm:ss since `since` (SystemClock.elapsedRealtime()). */
+@Composable
+private fun RecordingTime(since: Long, modifier: Modifier) {
+    val elapsed by produceState(0L, since) {
+        while (true) {
+            value = (SystemClock.elapsedRealtime() - since) / 1000
+            delay(1000 - (SystemClock.elapsedRealtime() - since) % 1000)
+        }
+    }
+    Row(modifier.background(Color(0x80000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(RED))
+        Spacer(Modifier.width(6.dp))
+        Text("%02d:%02d".format(elapsed / 60, elapsed % 60), color = Color.White, fontSize = 16.sp)
     }
 }
 

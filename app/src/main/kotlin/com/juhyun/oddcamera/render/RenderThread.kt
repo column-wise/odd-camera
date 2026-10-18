@@ -22,6 +22,8 @@ import com.juhyun.oddcamera.filter.none.NoneFilter
 import com.juhyun.oddcamera.gl.EglCore
 import com.juhyun.oddcamera.gl.GlProgram
 import com.juhyun.oddcamera.gl.GlUtil
+import com.juhyun.oddcamera.record.VideoEncoder
+import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 
 /** Everything a capture needs to reproduce what the preview showed at the shutter moment. */
@@ -30,7 +32,7 @@ data class CaptureSnapshot(val filter: Filter, val params: ParamValues, val anal
 
 /**
  * Dedicated GL thread: camera OES texture -> upright/cropped/(mirrored) RGBA frame FBO -> analysis readback
- * -> active filter into the filtered FBO (frame size) -> display (aspect-fit). Task 10 adds an encoder surface.
+ * -> active filter into the filtered FBO (frame size) -> display (aspect-fit) -> encoder while recording.
  */
 class RenderThread : HandlerThread("RenderThread") {
     /** Output mirrored horizontally (selfie style). Applied when drawing OES -> frame FBO. */
@@ -58,6 +60,19 @@ class RenderThread : HandlerThread("RenderThread") {
     private lateinit var oesProgram: GlProgram
     private lateinit var blitProgram: GlProgram
     private var photoRenderer: PhotoRenderer? = null
+    private var rotator: FrameRotator? = null
+
+    /** Encoder target; rotation frozen at record start. rotFbo/outFbo are allocated when a frame needs them. */
+    private class Recording(val encoder: VideoEncoder, val rot: Int, val surface: EGLSurface?, val w: Int, val h: Int) {
+        var rotFbo: GlUtil.Fbo? = null
+        var outFbo: GlUtil.Fbo? = null
+        var readback: ByteBuffer? = null
+        var ptsWarned = false
+    }
+    private var recording: Recording? = null
+    /** True between startRecording and stopRecording (Task 11 freezes its governor on it). */
+    @Volatile var isRecording = false
+        private set
 
     private var display: EGLSurface? = null
     private var displayW = 0
@@ -112,6 +127,36 @@ class RenderThread : HandlerThread("RenderThread") {
         photo.render(src, snapshot, rendererFor(snapshot.filter))
     } ?: error("render thread gone")
 
+    /**
+     * Starts feeding [encoder] (sized for rotationDeg, see encoderCandidates) with every rendered frame. Blocks until
+     * the encoder EGL surface exists; throws if it can't be created (VideoEncoder.create then tries the next config).
+     */
+    fun startRecording(encoder: VideoEncoder, rotationDeg: Int) {
+        runSync {
+            val core = checkNotNull(egl) { "render thread shut down" }
+            check(recording == null) { "already recording" }
+            val c = encoder.config
+            val surface = encoder.inputSurface()?.let { core.createWindowSurface(it) }
+            recording = Recording(encoder, Math.floorMod(rotationDeg, 360), surface, c.width, c.height)
+            isRecording = true
+        } ?: error("render thread gone")
+    }
+
+    /** Stops feeding the encoder and frees its EGL surface; the caller then calls encoder.stop(). Idempotent. */
+    fun stopRecording() {
+        runSync { releaseRecording() }
+    }
+
+    private fun releaseRecording() {
+        val r = recording ?: return
+        recording = null
+        isRecording = false
+        idleSurface?.let { egl?.makeCurrent(it) }
+        r.surface?.let { egl?.releaseSurface(it) }
+        r.rotFbo?.release()
+        r.outFbo?.release()
+    }
+
     /** Blocks until the GL thread is ready. */
     fun startAndWait(): RenderThread {
         start()
@@ -152,6 +197,7 @@ class RenderThread : HandlerThread("RenderThread") {
 
     private fun finishShutdown() {
         if (egl == null) return
+        releaseRecording()
         liveStreams.toList().forEach(::releaseStream)
         frame?.release()
         frame = null
@@ -161,6 +207,8 @@ class RenderThread : HandlerThread("RenderThread") {
         renderers.clear()
         photoRenderer?.release()
         photoRenderer = null
+        rotator?.release()
+        rotator = null
         analysisReader.release()
         oesProgram.release()
         blitProgram.release()
@@ -250,6 +298,74 @@ class RenderThread : HandlerThread("RenderThread") {
 
         applyFilter(f, mirror)
         drawDisplay()
+        recording?.let { r ->
+            try {
+                drawEncoder(r, f, s.st.timestamp)
+            } catch (t: Throwable) { // a failing encoder must not take the preview down; stop() reports the file
+                Log.e(TAG, "encoder frame failed; no longer feeding the encoder", t)
+                releaseRecording()
+            }
+        }
+    }
+
+    /**
+     * The filtered frame at encoder size in output orientation. Rotation 0: the preview's filtered FBO as is.
+     * Otherwise like a photo: rotate the source frame and the analysis, then FilterPass at encoder size.
+     */
+    private fun drawEncoder(r: Recording, f: GlUtil.Fbo, cameraTsNs: Long) {
+        val core = egl ?: return
+        val snap = lastRendered ?: return
+        var tex = filtered?.tex ?: return
+        val pts = r.encoder.framePtsNs(cameraTsNs)
+        if (pts < 0) return
+        var srcW = f.width
+        var srcH = f.height
+        if (r.rot != 0) {
+            val rotFbo = r.rotFbo ?: GlUtil.Fbo(r.w, r.h).also { r.rotFbo = it }
+            val out = r.outFbo ?: GlUtil.Fbo(r.w, r.h).also { r.outFbo = it }
+            (rotator ?: FrameRotator().also { rotator = it }).draw(f.tex, srcTopFirst = false, r.rot, mirror = false, rotFbo)
+            FilterPass.render(rendererFor(snap.filter), rotFbo.tex, out.id, r.w, r.h, snap.params,
+                FrameRotator.rotate(snap.analysis, r.rot))
+            tex = out.tex
+            srcW = r.w
+            srcH = r.h
+        }
+        val surface = r.surface
+        if (surface != null) {
+            core.makeCurrent(surface)
+            blit(tex, srcW, srcH, 0, r.w, r.h)
+            if (!core.setPresentationTime(surface, pts) && !r.ptsWarned) {
+                r.ptsWarned = true
+                Log.w(TAG, "eglPresentationTimeANDROID failed: 0x${Integer.toHexString(EGL14.eglGetError())}")
+            }
+            check(core.swap(surface)) { "encoder eglSwapBuffers failed: 0x${Integer.toHexString(EGL14.eglGetError())}" }
+        } else {
+            // Buffer fallback: encoder-size FBO -> glReadPixels -> CPU YUV conversion inside the encoder.
+            val out = r.outFbo ?: GlUtil.Fbo(r.w, r.h).also { r.outFbo = it }
+            if (r.rot == 0) blit(tex, srcW, srcH, out.id, r.w, r.h)
+            val buf = r.readback ?: ByteBuffer.allocateDirect(r.w * r.h * 4).also { r.readback = it }
+            buf.clear()
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, out.id)
+            GLES30.glReadPixels(0, 0, r.w, r.h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            r.encoder.submitFrame(buf, pts)
+        }
+        GlUtil.checkGlError("encoder frame")
+    }
+
+    /** Draws tex (srcW×srcH) aspect-fit (black bars) into framebuffer fbo (0 = current surface) of size w×h. */
+    private fun blit(tex: Int, srcW: Int, srcH: Int, fbo: Int, w: Int, h: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
+        GLES30.glViewport(0, 0, w, h)
+        GLES30.glClearColor(0f, 0f, 0f, 1f)
+        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+        val v = GlUtil.aspectFit(srcW, srcH, w, h)
+        GLES30.glViewport(v[0], v[1], v[2], v[3])
+        blitProgram.use()
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
+        GlUtil.drawQuad(blitProgram)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
     /** frame -> analysis -> active filter -> filtered FBO; publishes the analysis for capture. */
@@ -282,17 +398,12 @@ class RenderThread : HandlerThread("RenderThread") {
         val core = egl ?: return
         val d = display ?: return
         core.makeCurrent(d)
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        GLES30.glViewport(0, 0, displayW, displayH)
-        GLES30.glClearColor(0f, 0f, 0f, 1f)
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
-        filtered?.let { f ->
-            val r = GlUtil.aspectFit(f.width, f.height, displayW, displayH)
-            GLES30.glViewport(r[0], r[1], r[2], r[3])
-            blitProgram.use()
-            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, f.tex)
-            GlUtil.drawQuad(blitProgram)
+        val f = filtered
+        if (f != null) blit(f.tex, f.width, f.height, 0, displayW, displayH) else {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            GLES30.glViewport(0, 0, displayW, displayH)
+            GLES30.glClearColor(0f, 0f, 0f, 1f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         }
         GlUtil.checkGlError("display blit")
         if (!core.swap(d)) Log.w(TAG, "eglSwapBuffers failed: 0x${Integer.toHexString(EGL14.eglGetError())}")

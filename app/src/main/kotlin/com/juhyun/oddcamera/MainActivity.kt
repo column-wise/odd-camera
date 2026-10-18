@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.OrientationEventListener
@@ -29,11 +30,16 @@ import androidx.lifecycle.lifecycleScope
 import com.juhyun.oddcamera.camera.CameraController
 import com.juhyun.oddcamera.capture.MediaSaver
 import com.juhyun.oddcamera.capture.PhotoCapturer
+import com.juhyun.oddcamera.record.VideoEncoder
 import com.juhyun.oddcamera.render.RenderThread
 import com.juhyun.oddcamera.ui.CameraScreen
 import com.juhyun.oddcamera.ui.CameraViewModel
+import com.juhyun.oddcamera.ui.CaptureMode
 import com.juhyun.oddcamera.ui.PermissionGate
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -41,15 +47,22 @@ class MainActivity : ComponentActivity() {
     private lateinit var camera: CameraController
     private lateinit var orientationListener: OrientationEventListener
     private var granted by mutableStateOf(false)
-    private val vm: CameraViewModel by viewModels()
+    internal val vm: CameraViewModel by viewModels()
+    /** Non-null while recording. */
+    private var encoder: VideoEncoder? = null
+    private var micAsked = false
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+    /** Asked once per activity on the first video record; the shutter then proceeds whatever the answer. */
+    private val requestMic =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { onShutter() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         renderThread = RenderThread().startAndWait()
         camera = CameraController(this, this, renderThread)
+        camera.onRebind = ::stopRecording // lens / mode switch
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation != ORIENTATION_UNKNOWN) renderThread.outputRotationDeg = (orientation + 45) / 90 * 90 % 360
@@ -70,8 +83,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     CameraScreen(
                         vm, camera, renderThread,
-                        onCapturePhoto = ::capturePhoto,
-                        onToggleRecording = { Log.i(TAG, "toggle recording (Task 10)") },
+                        onShutter = ::onShutter,
                     ) { AndroidView(::createPreviewView, Modifier.fillMaxSize()) }
                 }
             }
@@ -101,6 +113,54 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun onShutter() {
+        if (vm.mode.value == CaptureMode.VIDEO && encoder == null && !micAsked && !hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            micAsked = true
+            return requestMic.launch(Manifest.permission.RECORD_AUDIO)
+        }
+        vm.shutter(::capturePhoto, ::toggleRecording)
+    }
+
+    /** Starts recording, or stops and finalizes it. Main thread; also the test hook. */
+    internal fun toggleRecording() = if (encoder != null) stopRecording() else startRecording()
+
+    private fun startRecording() {
+        val withAudio = hasPermission(Manifest.permission.RECORD_AUDIO)
+        if (!withAudio) Toast.makeText(this, "마이크 권한 없음: 소리 없이 녹화", Toast.LENGTH_SHORT).show()
+        val rot = renderThread.outputRotationDeg // frozen for this recording
+        // ponytail: MediaStore insert + codec setup (~100 ms) run on the main thread once per start; move to IO if it janks.
+        val pending = try { MediaSaver(contentResolver).beginVideo() } catch (t: Throwable) { return recordFailed(applicationContext, t) }
+        var enc: VideoEncoder? = null
+        try {
+            enc = VideoEncoder.create(rot, pending, withAudio) { renderThread.startRecording(it, rot) }
+            enc.start()
+        } catch (t: Throwable) {
+            renderThread.stopRecording()
+            enc?.release()
+            pending.abort()
+            return recordFailed(applicationContext, t)
+        }
+        encoder = enc
+        vm.recordingSince.value = SystemClock.elapsedRealtime()
+    }
+
+    /** Stops feeding frames now; the file finalizes in the background, surviving this activity. Idempotent. */
+    private fun stopRecording() {
+        val enc = encoder ?: return
+        encoder = null
+        vm.recordingSince.value = null
+        renderThread.stopRecording()
+        val app = applicationContext
+        val vm = vm
+        finalizeScope.launch {
+            try {
+                vm.lastCapture.value = enc.stop()
+            } catch (t: Throwable) {
+                recordFailed(app, t)
+            }
+        }
+    }
+
     private fun photoFailed(t: Throwable?) {
         Log.e(TAG, "photo capture failed", t)
         Toast.makeText(this, "사진 저장 실패", Toast.LENGTH_SHORT).show()
@@ -122,6 +182,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        vm.cancelCountdown() // a video countdown must not start recording in the background
+        stopRecording()
         orientationListener.disable()
         super.onStop()
     }
@@ -131,10 +193,18 @@ class MainActivity : ComponentActivity() {
         renderThread.shutdown()
     }
 
-    private fun hasCameraPermission() =
-        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    private fun hasCameraPermission() = hasPermission(Manifest.permission.CAMERA)
+
+    private fun hasPermission(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
     private companion object {
         const val TAG = "MainActivity"
+        /** Finalizing a video must outlive the activity (onStop/destroy mid-recording). */
+        val finalizeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+        fun recordFailed(context: android.content.Context, t: Throwable) {
+            Log.e(TAG, "video recording failed", t)
+            Toast.makeText(context, "동영상 저장 실패", Toast.LENGTH_SHORT).show()
+        }
     }
 }

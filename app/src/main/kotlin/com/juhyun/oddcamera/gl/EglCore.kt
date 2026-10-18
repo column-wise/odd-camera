@@ -57,9 +57,8 @@ class EglCore {
 
     fun swap(s: EGLSurface): Boolean = EGL14.eglSwapBuffers(display, s)
 
-    fun setPresentationTime(s: EGLSurface, ns: Long) {
-        EGLExt.eglPresentationTimeANDROID(display, s, ns)
-    }
+    /** False if the driver rejected it (the encoder would then stamp frames itself). */
+    fun setPresentationTime(s: EGLSurface, ns: Long): Boolean = EGLExt.eglPresentationTimeANDROID(display, s, ns)
 
     fun releaseSurface(s: EGLSurface) {
         EGL14.eglDestroySurface(display, s)
