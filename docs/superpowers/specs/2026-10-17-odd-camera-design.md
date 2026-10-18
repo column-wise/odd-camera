@@ -53,16 +53,16 @@ Reference: `workspace/KakaoTalk_20261018_130553708.mp4` (a fan recreation of the
 - **Region**: on-device person segmentation (ML Kit selfie segmentation, stream mode; works for any visible people, no network). Setting "영역 기준" = 사람 (default) / 밝은 부분 (old brightness rule, relative top-N % threshold) so scenes without people still have an option.
 - **Glyphs**: every in-region cell gets a symbol picked pseudo-randomly per cell from the glyph set (no blanks, no brightness ramp); default set `#%@=+*$&` ("기호"). Symbols are stable per cell with a small fraction re-rolling a few times per second. Glyph set choice (presets + custom string) stays.
 - **Color**: white cell background, all glyphs one red.
-- **Outside region**: grayscale and slightly darkened (toggle "배경 흑백", default on).
-- **Edge**: soft feathered white glow at the silhouette edge.
+- **Outside region**: 4-level posterized gray (lightly blurred luma quantized to flat bands 32/96/160/224) (toggle "배경 단순화", default on; off = the original image).
+- **Edge**: soft white glow fading over about one glyph cell just outside the person region.
 - **Full-frame** toggle remains (whole image as brightness-ramped glyphs, as before).
 - **Capture**: photos re-run segmentation on the still (exposure/resolution-correct mask); video uses the per-frame preview mask. Glyph re-roll state is part of the analysis so captures match the preview moment.
-- User controls: region mode, brightness threshold (bright mode), columns, full-frame, glyph set, background grayscale.
+- User controls: region mode, brightness threshold (bright mode), columns, full-frame, glyph set, background simplification ("배경 단순화").
 
 ### Settings persistence (user request)
-Every filter's parameter values are **saved per filter** and restored on next launch; changing ASCII settings never affects Light Boxes and vice versa.
+Every filter's parameter values are **saved per filter** and restored on next launch; changing ASCII settings never affects Light Boxes and vice versa. Only values that differ from their defaults are stored, so a later change of a default reaches users who never moved that setting.
 
-Parameters must be **resolution-independent** (e.g. cell size and box line width as a fraction of frame width) so the same settings produce the same look in preview, 1080p video and full-res photo.
+Parameters must be **resolution-independent** (e.g. cell size and box line width as a fraction of the frame's short side, i.e. the portrait preview's width, which stays the short side of a landscape capture) so the same settings produce the same look in preview, 1080p video and full-res photo.
 
 ## Camera features
 
