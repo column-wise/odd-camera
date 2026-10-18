@@ -59,6 +59,16 @@ Reference: `workspace/KakaoTalk_20261018_130553708.mp4` (a fan recreation of the
 - **Capture**: photos re-run segmentation on the still (exposure/resolution-correct mask); video uses the per-frame preview mask. Glyph re-roll state is part of the analysis so captures match the preview moment.
 - User controls: region mode, brightness threshold (bright mode), columns, full-frame, glyph set, background simplification ("배경 단순화").
 
+### Kaleidoscope (added 2026-10-18, user request)
+Reference: `workspace/화면 녹화 중 2026-10-18 142602.mp4` (Kyo181 clip: a figure repeated as 4 translucent overlapping copies). User decisions:
+- Fixed square grid over the frame; cell size = short side / `cells` (default 6). No zoom.
+- Each cell's content is drawn 4 times: original, shifted right, shifted down, shifted down-right by the same offset `o`; all copies blended with equal weight (translucent overlap). Copies are NOT clipped to their cell — they spill over neighbors (option "B").
+- Offset grows toward the frame center: `o = maxShift × cell × falloff(distance)`, `maxShift` default 0.8 (80 % of a cell at the exact center), ≈ 0 at the corners.
+- User controls: cells, max shift, falloff; persisted per filter. Captures match the preview (short-side sizing).
+- Display name "Kaleidoscope"; appended after Ballad of You.
+
+Display name of the ASCII filter is now **"Ballad of You"** (id `ascii` unchanged). Top bar: flash / torch / timer / lens switch are icons; the panel button reads "필터 설정".
+
 ### Settings persistence (user request)
 Every filter's parameter values are **saved per filter** and restored on next launch; changing ASCII settings never affects Light Boxes and vice versa. Only values that differ from their defaults are stored, so a later change of a default reaches users who never moved that setting.
 

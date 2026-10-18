@@ -370,3 +370,19 @@ Box geometry (Task 3): `data class Box(val x: Float, val y: Float, val w: Float,
 - [ ] **Step 2:** Device test (AsciiRenderTest): inject an `AsciiAnalysis` with a synthetic mask (left half 255) → left-half cells contain red+white only, right half gray (R≈G≈B) when grayBackground, equals src when off; orientation-sensitive; 2-width comparison holds.
 - [ ] **Step 3:** FAIL → implement → PASS. Device manual: point at a person (or the user) → silhouette filled; screencaps.
 - [ ] **Step 4:** Commit `feat: ascii v2 person segmentation`.
+
+### Task 14: Kaleidoscope filter (added 2026-10-18)
+
+**Files:** Create `filter/kaleidoscope/KaleidoscopeFilter.kt`; Modify `filter/FilterRegistry.kt` (append after AsciiFilter); Tests `test/.../kaleidoscope/KaleidoscopeMathTest.kt`, `androidTest/.../render/KaleidoscopeRenderTest.kt`
+
+**Spec:** "Kaleidoscope" section of the design doc.
+
+**Interfaces:**
+- `object KaleidoscopeFilter : Filter`, `id = "kaleidoscope"`, `title = "Kaleidoscope"`, params: `IntParam("cells","칸 개수",3,16,6)`, `FloatParam("maxShift","최대 밀림",0f,1f,0.8f,0.05f)`, `FloatParam("falloff","중앙 집중도",0.5f,4f,1.5f,0.1f)`. `analyze` returns threshold 256 (no analysis; needsRgba false).
+- Pure: `fun shiftFraction(cellCenterX: Float, cellCenterY: Float, w: Float, h: Float, maxShift: Float, falloff: Float): Float` = `maxShift * max(0, 1 - d)^falloff`, `d` = distance from frame center / half-diagonal. Cell size `c = min(w,h) / cells`; grid anchored so the frame center is a cell center (grid symmetric).
+- Shader: for output pixel p, for candidate cells (own, left, up, up-left) and each offset k ∈ {(0,0),(o,0),(0,o),(o,o)} with o = shiftFraction(cell)×c: q = p − k; if q lies inside that cell, accumulate src(q). Output = sum / count (count ≥ 1 always since (0,0) of own cell hits).
+
+- [ ] **Step 1:** JVM tests: `shiftFraction` = maxShift at center, ≈0 at corners, monotone along a ray, symmetric; cell size uses short side.
+- [ ] **Step 2:** Device test: synthetic frame (single small white square at a center cell) → output shows 4 copies at offsets ≈ 0.8 cell (right, down, down-right) at ~1/4 brightness each where non-overlapping; a white square in a corner cell is unchanged; 2-width (portrait vs rotated) comparison holds.
+- [ ] **Step 3:** FAIL → implement → PASS. Device screencap.
+- [ ] **Step 4:** Commit `feat: kaleidoscope filter`.
