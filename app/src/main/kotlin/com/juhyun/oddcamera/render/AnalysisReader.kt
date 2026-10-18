@@ -19,10 +19,12 @@ class AnalysisReader {
     private var flip: GlProgram? = null
     private var rgbaFbo: GlUtil.Fbo? = null
     private var rgbaPixels: ByteBuffer? = null
+    private var rgbaBytes = ByteArray(0)
 
     /**
      * Returns the luma of frameTex (row 0 = top), analysisWidth wide, height keeping the frame aspect.
-     * rgbaWidth > 0 also reads the frame as image-order RGBA at that width (bilinear, aspect kept) into [LumaFrame.rgba].
+     * rgbaWidth > 0 also reads the frame as image-order RGBA at that width (box-averaged, aspect kept) into
+     * [LumaFrame.rgba]; that array is reused by the next read, so consumers must copy it before returning.
      */
     fun read(frameTex: Int, frameW: Int, frameH: Int, analysisWidth: Int, rgbaWidth: Int = 0): LumaFrame {
         val w = analysisWidth
@@ -49,27 +51,30 @@ class AnalysisReader {
         for (i in luma.indices) luma[i] = buf.get(i * 4)
         if (rgbaWidth <= 0) return LumaFrame(luma, w, h, lumaHistogram(luma))
         val rh = maxOf(1, Math.round(rgbaWidth.toFloat() * frameH / frameW))
-        return LumaFrame(luma, w, h, lumaHistogram(luma), readRgba(frameTex, rgbaWidth, rh), rgbaWidth, rh)
+        return LumaFrame(luma, w, h, lumaHistogram(luma), readRgba(frameTex, frameW, frameH, rgbaWidth, rh), rgbaWidth, rh)
     }
 
-    private fun readRgba(frameTex: Int, w: Int, h: Int): ByteArray {
+    private fun readRgba(frameTex: Int, frameW: Int, frameH: Int, w: Int, h: Int): ByteArray {
         val f = rgbaFbo?.takeIf { it.width == w && it.height == h } ?: run {
             rgbaFbo?.release()
             rgbaPixels = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
             GlUtil.Fbo(w, h).also { rgbaFbo = it }
         }
-        val p = flip ?: GlProgram(GlUtil.QUAD_VS, FLIP_FS).also { flip = it }
+        val p = flip ?: GlProgram(GlUtil.QUAD_VS, AVG_FS).also { flip = it }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, f.id)
         GLES30.glViewport(0, 0, w, h)
         p.use()
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frameTex)
+        GLES30.glUniform2i(p.uniform("uSrc"), frameW, frameH)
+        GLES30.glUniform2i(p.uniform("uDst"), w, h)
         GlUtil.drawQuad(p)
         val buf = rgbaPixels!!.apply { clear() }
         GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GlUtil.checkGlError("analysis rgba read")
-        return ByteArray(w * h * 4).also { buf.get(it) }
+        if (rgbaBytes.size != w * h * 4) rgbaBytes = ByteArray(w * h * 4)
+        return rgbaBytes.also { buf.get(it) }
     }
 
     fun release() {
@@ -83,13 +88,36 @@ class AnalysisReader {
     }
 
     private companion object {
-        // Frame FBO row 0 = bottom; readback row 0 = frame top (image order).
-        const val FLIP_FS = """#version 300 es
+        // Box average of the frame block each output pixel covers (a 4000 px still -> 256 px must not alias);
+        // output row y (readback row 0) = the y-th block from the frame TOP, i.e. image order.
+        // ponytail: ≤ 16 taps per axis (4000 -> 256 is 15.6×), strided beyond that.
+        const val AVG_FS = """#version 300 es
 precision highp float;
+precision highp int;
 uniform sampler2D uTex;
-in vec2 vUv;
+uniform ivec2 uSrc;
+uniform ivec2 uDst;
 out vec4 outColor;
-void main() { outColor = vec4(texture(uTex, vec2(vUv.x, 1.0 - vUv.y)).rgb, 1.0); }"""
+const int MAX_TAPS = 16;
+void main() {
+    ivec2 o = ivec2(gl_FragCoord.xy);
+    ivec2 lo = o * uSrc / uDst;
+    ivec2 hi = max((o + 1) * uSrc / uDst, lo + 1);
+    ivec2 step = max((hi - lo + MAX_TAPS - 1) / MAX_TAPS, ivec2(1));
+    vec3 s = vec3(0.0);
+    float n = 0.0;
+    for (int j = 0; j < MAX_TAPS; j++) {
+        int k = lo.y + j * step.y;
+        if (k >= hi.y) break;
+        for (int i = 0; i < MAX_TAPS; i++) {
+            int x = lo.x + i * step.x;
+            if (x >= hi.x) break;
+            s += texelFetch(uTex, ivec2(x, uSrc.y - 1 - k), 0).rgb;
+            n += 1.0;
+        }
+    }
+    outColor = vec4(s / n, 1.0);
+}"""
 
         // Max-pool: each analysis pixel = brightest texel (exact texelFetch) of the frame block it covers, so a
         // 1-2 px lamp never vanishes or blinks with sub-pixel shake (bilinear/averaging would dim it).

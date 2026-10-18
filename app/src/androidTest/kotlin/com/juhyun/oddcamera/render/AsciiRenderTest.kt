@@ -63,6 +63,16 @@ class AsciiRenderTest {
     private fun isRedOnWhite(c: Int) = Math.abs(Color.green(c) - Color.blue(c)) <= 14 && Color.red(c) >= Color.green(c) - 2
     private fun isRed(c: Int) = Color.red(c) - Color.green(c) > 100
     private fun isGray(c: Int, v: Int) = listOf(Color.red(c), Color.green(c), Color.blue(c)).all { Math.abs(it - v) <= 2 }
+    /** One of the 4 posterize levels. */
+    private fun isLevel(c: Int) = listOf(32, 96, 160, 224).any { isGray(c, it) }
+    /** Outside pixels: white src -> 224, DARK (luma 72.6) -> 96. */
+    private fun assertPosterized(px: IntArray, w: Int, h: Int, skip: (Int, Int) -> Boolean) {
+        for (y in 0 until h) for (x in 0 until w) {
+            if (skip(x, y) || Math.abs(y - h / 2) <= 4) continue // src seam (blur taps reach ±2 px at 360)
+            val c = px[y * w + x]
+            assertTrue("($x,$y) ${Integer.toHexString(c)} not level", isGray(c, if (y < h / 2) 224 else 96))
+        }
+    }
 
     @Test fun brightModeFillsOnlyTheBrightTopHalf() {
         val (px, h) = render(360) { set("grayBackground", false) }
@@ -73,10 +83,9 @@ class AsciiRenderTest {
             assertEquals("dark pixel ($x,$y) must be src", DARK, px[y * 360 + x])
     }
 
-    @Test fun brightModeGraysTheRest() {
+    @Test fun brightModePosterizesTheRest() {
         val (px, h) = render(360)
-        for (y in h * 5 / 8 until h) for (x in 0 until 360)
-            assertTrue("($x,$y) ${Integer.toHexString(px[y * 360 + x])} not gray", isGray(px[y * 360 + x], 58))
+        assertPosterized(px, 360, h) { _, y -> y < h / 2 }
     }
 
     @Test fun fullFrameTurnsDarkHalfIntoGlyphsOnBlack() {
@@ -93,8 +102,12 @@ class AsciiRenderTest {
     }
 
     @Test fun resolutionIndependent() {
-        val (a, ha) = render(360)
-        val (b, hb) = render(1440)
+        val params = ParamValues(AsciiFilter.params).apply { set("region", "bright"); set("topPercent", 60f) }
+        val reader = AnalysisReader()
+        val analysis = AsciiFilter.analyze(reader.read(src, SW, SH, 160), params, null) // one epoch for both
+        reader.release()
+        val (a, ha) = render(360, analysis)
+        val (b, hb) = render(1440, analysis)
         val mad = downscaledMad(a, 360, ha, b, 1440, hb)
         assertTrue("mean abs diff $mad >= 6", mad < 6)
     }
@@ -104,7 +117,7 @@ class AsciiRenderTest {
 
     private fun personRender(width: Int, gray: Boolean) = render(width, quadrant) { set("region", "person"); set("grayBackground", gray) }
 
-    @Test fun personMaskFillsItsCellsAndGraysTheRest() {
+    @Test fun personMaskFillsItsCellsAndPosterizesTheRest() {
         val w = 360
         val (px, h) = personRender(w, gray = true)
         val m = 24 // > 2 cells (6 px) + mask texel (11 px) from the mask edge
@@ -115,21 +128,40 @@ class AsciiRenderTest {
             if (isRed(c)) red++
         }
         assertTrue("no glyphs in the person region", red > 50)
-        for (y in 0 until h) for (x in 0 until w) {
-            if (x < w / 2 + m && y < h / 2 + m || Math.abs(y - h / 2) <= 2) continue // region/glow, src seam
-            val expect = if (y < h / 2) 204 else 58 // luma × 0.8
-            assertTrue("($x,$y) ${Integer.toHexString(px[y * w + x])} not gray $expect", isGray(px[y * w + x], expect))
-        }
-        // Soft glow: just outside the right edge of the region, brighter than the plain gray further right.
+        assertPosterized(px, w, h) { x, y -> x < w / 2 + m && y < h / 2 + m }
+        // Soft glow: just outside the right edge of the region, brighter than the 224 band around it.
         val edge = px[(h / 4) * w + w / 2 + 2]
-        assertTrue("no glow at the edge: ${Integer.toHexString(edge)}", Color.red(edge) > 204 + 10)
+        assertTrue("no glow at the edge: ${Integer.toHexString(edge)}", Color.red(edge) > 224 + 10)
+    }
+
+    /**
+     * Glow follows the binarized region, not raw confidence: a wide 0.4 area away from the person stays plain, and
+     * nothing glows farther than ~1 cell (6 px at 360) from the region.
+     */
+    @Test fun lowConfidenceAreaStaysGrainAndGlowHugsTheRegion() {
+        val w = 360
+        val mask = Mask(ByteArray(32 * 24) { i ->
+            val x = i % 32; val y = i / 32
+            when { x < 16 && y < 12 -> -1; x >= 20 && y >= 14 -> 102; else -> 0 }
+        }, 32, 24)
+        val (px, h) = render(w, AsciiAnalysis(256, mask, 5)) { set("region", "person") }
+        // Anything off-level outside the region must be glow within 2 cells of the quadrant (cells are 6 px).
+        for (y in 0 until h) for (x in 0 until w) {
+            val c = px[y * w + x]
+            if (x < w / 2 - 12 && y < h / 2 - 12 || Math.abs(y - h / 2) <= 4) continue
+            if (!isLevel(c))
+                assertTrue("($x,$y) ${Integer.toHexString(c)} off-level away from the region", x < w / 2 + 12 && y < h / 2 + 12)
+        }
+        // The 0.4 area (bottom-right, dark src) is the plain 96 band, no glow.
+        for (y in h * 5 / 8 until h) for (x in w * 5 / 8 until w)
+            assertTrue("0.4 area ($x,$y) glows", isGray(px[y * w + x], 96))
     }
 
     @Test fun personModeWithoutGrayKeepsSrcOutside() {
         val w = 360
         val (px, h) = personRender(w, gray = false)
         for (y in 0 until h) for (x in 0 until w) {
-            if (x < w / 2 + 24 && y < h / 2 + 24 || Math.abs(y - h / 2) <= 2) continue
+            if (x < w / 2 + 24 && y < h / 2 + 24 || Math.abs(y - h / 2) <= 4) continue
             assertEquals("($x,$y) must be src", if (y < h / 2) Color.WHITE else DARK, px[y * w + x])
         }
     }

@@ -120,9 +120,9 @@ class PhotoMatchesPreviewTest {
         val shot = photo.render(Bitmap.createScaledBitmap(darker, W * 4, H * 4, false),
             CaptureSnapshot(AsciiFilter, p.params, p.analysis, false, 0), r)
         r.release()
-        // Coverage = share of replaced-cell pixels (white or red glyph; this scene's gray background stays < 110).
+        // Coverage = share of replaced-cell pixels: white, or red-ish glyph ink (posterized gray has R = G = B ≤ 224).
         fun coverage(b: Bitmap) = b.pixels().count { c ->
-            Color.red(c) > 150
+            Color.red(c) >= 240 && Color.green(c) >= 240 || Color.red(c) - Color.green(c) > 30
         }.toDouble() / (b.width * b.height)
         val cp = coverage(p.image); val cs = coverage(shot)
         assertTrue("preview coverage $cp too small for a meaningful check", cp > 0.1)

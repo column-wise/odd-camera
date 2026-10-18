@@ -89,21 +89,21 @@ fun glyphFor(cellX: Int, cellY: Int, epoch: Int, setSize: Int): Int {
 
 /**
  * Region mode: cells over people (ML Kit segmentation) or over the bright parts become red random glyphs on white,
- * the rest goes gray with a soft white glow at the person edge. Full-frame mode: brightness-ramped glyphs everywhere.
+ * the rest becomes 4-level posterized gray with a soft white glow just outside the person region. Full-frame mode: brightness-ramped glyphs everywhere.
  */
 object AsciiFilter : Filter {
     override val id = "ascii"
     override val title = "아스키"
     override val params: List<FilterParam> = listOf(
         ChoiceParam("region", "영역 기준", listOf("person" to "사람", "bright" to "밝은 부분"), "person"),
-        FloatParam("topPercent", "밝은 부분 상위 %", 1f, 60f, 25f, 1f),
+        FloatParam("topPercent", "밝은 부분 상위 %", 1f, 60f, 25f, 1f, visibleWhen = "region" to "bright"),
         IntParam("columns", "가로 문자 수", 30, 160, 60),
         BoolParam("fullFrame", "전체 화면", false),
         ChoiceParam("glyphSet", "문자 종류", listOf(
             "symbols" to "기호", "classic" to "클래식", "dots" to "점", "blocks" to "블록", "binary" to "이진",
             "custom" to "직접 입력"), "symbols"),
         TextParam("customGlyphs", "직접 입력 문자", "", maxCodePoints = 16),
-        BoolParam("grayBackground", "배경 흑백", true),
+        BoolParam("grayBackground", "배경 단순화", true),
     )
 
     /** GL thread only (analyze / captureAnalysis / renderer release). Created lazily, dropped on renderer release. */
@@ -241,8 +241,11 @@ object AsciiFilter : Filter {
     // Cells are square, w / columns px, counted from the frame's top-left (GL y is up, so flip).
     // Cell luma = average of 4 taps inside the cell. uMode 0 = full frame (glyphIndex() above with threshold -1),
     // 1 = bright cells (luma > threshold), 2 = person cells (mask at the cell centre > 0.5).
-    // Region cells: white + red glyph ramp[1 + glyphFor()]. Outside: gray (luma × 0.8) or src, blended to white by
-    // smoothstep(0.15, 0.5, mask) for the edge glow. uMask t = 0 is the frame top.
+    // Region cells: white + red glyph ramp[1 + glyphFor()]. Outside: posterized gray (uGray) or src, then the glow.
+    // Posterize: 3×3 box blur of luma with taps w / 180 px apart (resolution-independent) -> floor(l / 64) * 64 + 32,
+    // i.e. flat 32/96/160/224 bands. Glow (person mode): white fading over 1 glyph cell from the nearest neighbouring
+    // region cell (binarized mask), so low-confidence areas never glow.
+    // uMask t = 0 is the frame top.
     // textureGrad keeps the atlas mip level smooth across cell edges (fract() would spike it).
     private const val FS = """#version 300 es
 precision highp float;
@@ -266,6 +269,9 @@ uint mix32(uint x) {
     x ^= x >> 15; x *= 0x846ca68bu;
     return x ^ (x >> 16);
 }
+uint cellHash(vec2 c) { return mix32((uint(int(c.x)) * 73856093u) ^ (uint(int(c.y)) * 19349663u)); }
+bool personAt(vec2 cell) { return texture(uMask, (cell + 0.5) * uCell / uSize).r > 0.5; }
+vec3 srcTop(vec2 p) { return texture(uTex, vec2(p.x / uSize.x, 1.0 - p.y / uSize.y)).rgb; }
 float glyph(int idx, vec2 local) {
     float n = float(uRamp);
     return textureGrad(uAtlas, vec2((float(idx) + local.x) / n, local.y),
@@ -278,7 +284,7 @@ void main() {
     vec3 c = vec3(0.0);
     for (int i = 0; i < 4; i++) {
         vec2 q = (cell + vec2(i % 2 == 0 ? 0.25 : 0.75, i < 2 ? 0.25 : 0.75)) * uCell;
-        c += texture(uTex, vec2(q.x / uSize.x, 1.0 - q.y / uSize.y)).rgb;
+        c += srcTop(q);
     }
     c *= 0.25;
     int l = int(dot(c, LUMA) * 255.0 + 0.5);
@@ -287,19 +293,28 @@ void main() {
         outColor = vec4(c * glyph(idx, local), 1.0);
         return;
     }
-    bool inside = uMode == 2
-        ? uHasMask && texture(uMask, (cell + 0.5) * uCell / uSize).r > 0.5
-        : l > uThreshold;
-    if (inside) {
-        uint h = mix32((uint(int(cell.x)) * 73856093u) ^ (uint(int(cell.y)) * 19349663u));
+    bool person = uMode == 2 && uHasMask;
+    if (person ? personAt(cell) : uMode == 1 && l > uThreshold) {
+        uint h = cellHash(cell);
         uint gen = (uint(uEpoch) + (h >> 8) % 10u) / 10u;
         int idx = 1 + int((mix32(h ^ mix32(gen)) >> 8) % uint(uRamp - 1));
         outColor = vec4(mix(vec3(1.0), vec3(208.0, 20.0, 30.0) / 255.0, glyph(idx, local)), 1.0);
         return;
     }
-    vec3 src = texture(uTex, vUv).rgb;
-    vec3 base = uGray ? vec3(dot(src, LUMA) * 0.8) : src;
-    float m = uHasMask ? texture(uMask, vec2(vUv.x, 1.0 - vUv.y)).r : 0.0;
-    outColor = vec4(mix(base, vec3(1.0), smoothstep(0.15, 0.5, m)), 1.0);
+    vec3 base = texture(uTex, vUv).rgb;
+    if (uGray) {
+        float r = uSize.x / 180.0;
+        vec2 p = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y);
+        vec3 s = vec3(0.0);
+        for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) s += srcTop(p + vec2(i, j) * r);
+        float bl = min(dot(s / 9.0, LUMA) * 255.0, 255.0);
+        base = vec3((floor(bl / 64.0) * 64.0 + 32.0) / 255.0);
+    }
+    float d = 2.0;
+    if (person) for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+        vec2 nc = cell + vec2(dx, dy);
+        if (personAt(nc)) d = min(d, length(g - clamp(g, nc, nc + 1.0)));
+    }
+    outColor = vec4(mix(base, vec3(1.0), 1.0 - smoothstep(0.0, 1.0, d)), 1.0);
 }"""
 }

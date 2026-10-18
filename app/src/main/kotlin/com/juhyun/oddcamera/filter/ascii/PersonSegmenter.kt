@@ -67,12 +67,18 @@ class PersonSegmenter {
         warned = true
     }
 
-    /** rgba: image-order RGBA bytes, w×h. Returns at once; the result lands in [latest]. */
+    /** Reused for every stream frame: only touched when no frame is in flight. */
+    private var streamBitmap: Bitmap? = null
+
+    /** rgba: image-order RGBA bytes, w×h, copied before returning. Returns at once; the result lands in [latest]. */
     fun submit(rgba: ByteArray, w: Int, h: Int) {
         val c = client(single = false) ?: return
         if (!busy.compareAndSet(false, true)) return
         try {
-            c.process(InputImage.fromBitmap(bitmap(rgba, w, h), 0))
+            val b = streamBitmap?.takeIf { it.width == w && it.height == h }
+                ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { streamBitmap = it }
+            b.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
+            c.process(InputImage.fromBitmap(b, 0))
                 .addOnSuccessListener(direct) { latest = toMask(it); busy.set(false) }
                 .addOnFailureListener(direct) { warn(it); busy.set(false) }
         } catch (t: Throwable) { warn(t); busy.set(false) }

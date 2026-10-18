@@ -1,8 +1,13 @@
 package com.juhyun.oddcamera.filter
 
-sealed interface FilterParam { val key: String; val label: String }
+sealed interface FilterParam {
+    val key: String; val label: String
+    /** Shown in the panel only while sibling ChoiceParam (key, value) is selected; null = always. */
+    val visibleWhen: Pair<String, String>? get() = null
+}
 data class FloatParam(override val key: String, override val label: String,
-                      val min: Float, val max: Float, val default: Float, val step: Float) : FilterParam
+                      val min: Float, val max: Float, val default: Float, val step: Float,
+                      override val visibleWhen: Pair<String, String>? = null) : FilterParam
 data class IntParam(override val key: String, override val label: String,
                     val min: Int, val max: Int, val default: Int) : FilterParam
 data class BoolParam(override val key: String, override val label: String, val default: Boolean) : FilterParam

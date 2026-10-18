@@ -57,6 +57,8 @@ class AsciiV2Test {
         assertTrue(AsciiFilter.needsRgba(p))
         p.set("region", "bright")
         assertTrue(!AsciiFilter.needsRgba(p))
+        assertEquals("region" to "bright", AsciiFilter.params.first { it.key == "topPercent" }.visibleWhen)
+        assertEquals(null, AsciiFilter.params.first { it.key == "columns" }.visibleWhen)
     }
 
     @Test fun symbolsSetResolvesWithLeadingBlank() {

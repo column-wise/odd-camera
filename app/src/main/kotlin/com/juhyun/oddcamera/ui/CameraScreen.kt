@@ -220,7 +220,7 @@ private fun ParamPanel(vm: CameraViewModel, filter: Filter, values: ParamValues)
     ) {
         if (filter.params.isEmpty()) Text("조정할 항목이 없습니다", color = Color.White)
         val customChosen = filter.params.any { it is ChoiceParam && values.string(it.key) == "custom" }
-        for (p in filter.params) when (p) {
+        for (p in filter.params.filter { q -> q.visibleWhen?.let { (k, v) -> values.string(k) == v } ?: true }) when (p) {
             is FloatParam -> {
                 val v = values.float(p.key)
                 Text("${p.label}  ${if (p.step < 1f) "%.1f".format(v) else v.roundToInt()}", color = Color.White)
