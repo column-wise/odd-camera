@@ -27,7 +27,21 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.FlashlightOff
+import androidx.compose.material.icons.filled.FlashlightOn
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Timer10
+import androidx.compose.material.icons.filled.Timer3
+import androidx.compose.material.icons.filled.TimerOff
 import androidx.compose.material3.FilterChip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -122,14 +136,23 @@ fun CameraScreen(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     if (mode == CaptureMode.PHOTO) {
                         // No flash unit (front camera): greyed out and shown off, since capture forces it off.
-                        Control(if (!hasFlash) "플래시 끔" else when (flash) { FlashMode.OFF -> "플래시 끔"; FlashMode.AUTO -> "플래시 자동"; FlashMode.ON -> "플래시 켬" },
-                            enabled = hasFlash) { vm.cycleFlash() }
+                        val (icon, desc) = if (!hasFlash) Icons.Filled.FlashOff to "플래시 끔" else when (flash) {
+                            FlashMode.OFF -> Icons.Filled.FlashOff to "플래시 끔"
+                            FlashMode.AUTO -> Icons.Filled.FlashAuto to "플래시 자동"
+                            FlashMode.ON -> Icons.Filled.FlashOn to "플래시 켬"
+                        }
+                        IconControl(icon, desc, enabled = hasFlash) { vm.cycleFlash() }
                     } else {
-                        Control(if (torch) "토치 켬" else "토치 끔") { vm.torch.value = !torch; camera.setTorch(!torch) }
+                        IconControl(if (torch) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff, if (torch) "토치 켬" else "토치 끔") {
+                            vm.torch.value = !torch; camera.setTorch(!torch)
+                        }
                     }
-                    Control(if (timerSeconds == 0) "타이머 끔" else "타이머 ${timerSeconds}초") { vm.cycleTimer() }
-                    Control("조정", selected = panelOpen) { panelOpen = !panelOpen }
-                    Control("전환") { vm.cancelCountdown(); vm.torch.value = false; camera.switchLens() }
+                    IconControl(
+                        when (timerSeconds) { 0 -> Icons.Filled.TimerOff; 3 -> Icons.Filled.Timer3; 10 -> Icons.Filled.Timer10; else -> Icons.Filled.Timer },
+                        if (timerSeconds == 0) "타이머 끔" else "타이머 ${timerSeconds}초",
+                    ) { vm.cycleTimer() }
+                    Control("필터 설정", selected = panelOpen) { panelOpen = !panelOpen }
+                    IconControl(Icons.Filled.Cameraswitch, "카메라 전환") { vm.cancelCountdown(); vm.torch.value = false; camera.switchLens() }
                 }
                 Spacer(Modifier.weight(1f))
                 if (panelOpen) ParamPanel(vm, filter, vm.values[index])
@@ -183,6 +206,13 @@ private fun RecordingTime(since: Long, modifier: Modifier) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(RED))
         Spacer(Modifier.width(6.dp))
         Text("%02d:%02d".format(elapsed / 60, elapsed % 60), color = Color.White, fontSize = 16.sp)
+    }
+}
+
+@Composable
+private fun IconControl(icon: ImageVector, description: String, enabled: Boolean = true, onClick: () -> Unit) {
+    IconButton(onClick, enabled = enabled) {
+        Icon(icon, contentDescription = description, tint = if (enabled) Color.White else Color.Gray)
     }
 }
 

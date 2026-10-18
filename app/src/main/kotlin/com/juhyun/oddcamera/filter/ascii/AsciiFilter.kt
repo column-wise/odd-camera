@@ -93,7 +93,7 @@ fun glyphFor(cellX: Int, cellY: Int, epoch: Int, setSize: Int): Int {
  */
 object AsciiFilter : Filter {
     override val id = "ascii"
-    override val title = "아스키"
+    override val title = "Ballad of You"
     override val params: List<FilterParam> = listOf(
         ChoiceParam("region", "영역 기준", listOf("person" to "사람", "bright" to "밝은 부분"), "person"),
         FloatParam("topPercent", "밝은 부분 상위 %", 1f, 60f, 25f, 1f, visibleWhen = "region" to "bright"),
