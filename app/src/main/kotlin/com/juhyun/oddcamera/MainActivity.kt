@@ -63,6 +63,12 @@ class MainActivity : ComponentActivity() {
         renderThread = RenderThread().startAndWait()
         camera = CameraController(this, this, renderThread)
         camera.onRebind = ::stopRecording // lens / mode switch
+        renderThread.onRenderError = {
+            runOnUiThread {
+                stopRecording() // finalizes what was recorded so far
+                Toast.makeText(this, "카메라 화면 오류", Toast.LENGTH_LONG).show()
+            }
+        }
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation != ORIENTATION_UNKNOWN) renderThread.outputRotationDeg = (orientation + 45) / 90 * 90 % 360

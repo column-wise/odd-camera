@@ -75,6 +75,11 @@ class RenderThread : HandlerThread("RenderThread") {
     @Volatile var isRecording = false
         private set
 
+    /** Called once on the GL thread after [MAX_FRAME_FAILURES] frames in a row threw; rendering then stops. */
+    @Volatile var onRenderError: () -> Unit = {}
+    private var frameFailures = 0
+    private var renderDead = false
+
     private var display: EGLSurface? = null
     private var displayW = 0
     private var displayH = 0
@@ -234,6 +239,8 @@ class RenderThread : HandlerThread("RenderThread") {
         val tex = GlUtil.createOesTexture()
         val st = SurfaceTexture(tex).apply { setDefaultBufferSize(size.width, size.height) }
         val s = CameraStream(tex, st, Surface(st), size.width, size.height)
+        frameFailures = 0 // a new stream (lens / mode switch) gets another chance
+        renderDead = false
         stream = s // a previous stream stays alive until its own result callback below
         liveStreams += s
         st.setOnFrameAvailableListener({ if (stream === s) timedFrame(s) }, handler)
@@ -268,8 +275,26 @@ class RenderThread : HandlerThread("RenderThread") {
 
     /** Frame time = onFrameAvailable entry to the last swap's return (CPU wall time), fed to the governor + 1 Hz log. */
     private fun timedFrame(s: CameraStream) {
+        if (renderDead) { // keep consuming camera buffers so the producer never stalls
+            runCatching { s.st.updateTexImage() }
+            return
+        }
         val t0 = System.nanoTime()
-        onFrame(s)
+        try {
+            onFrame(s)
+            frameFailures = 0
+        } catch (t: Throwable) { // incl. OOM allocating an FBO: one bad frame must not kill the app
+            frameFailures++
+            if (frameFailures == 1 || frameFailures % 10 == 0) Log.e(TAG, "frame failed ($frameFailures in a row)", t)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            repeat(16) { GLES30.glGetError() } // clear stale error flags (bounded: a lost context reports forever)
+            if (frameFailures >= MAX_FRAME_FAILURES) {
+                Log.e(TAG, "giving up rendering after $frameFailures failed frames")
+                renderDead = true
+                onRenderError()
+            }
+            return
+        }
         val t1 = System.nanoTime()
         val ms = (t1 - t0) / 1e6f
         governor.onFrame(ms)
@@ -460,6 +485,8 @@ class RenderThread : HandlerThread("RenderThread") {
     companion object {
         private const val TAG = "RenderThread"
         private const val PERF_TAG = "OddPerf"
+        /** ~1 s of frames. */
+        private const val MAX_FRAME_FAILURES = 30
         /** Even, >= 2. */
         private fun scaled(v: Int, scale: Float) = maxOf(2, Math.round(v * scale / 2f) * 2)
         /** Full analysis width (ruling R7: ≤160); the governor lowers the preview's. Photo analysis always uses this. */
