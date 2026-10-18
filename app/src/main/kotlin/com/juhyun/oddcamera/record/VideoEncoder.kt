@@ -69,6 +69,15 @@ class VideoEncoder(val config: EncoderConfig, private val pending: MediaSaver.Pe
 
     val hasAudio get() = audio != null
 
+    /**
+     * Called once, on the failing thread, when the recording fails mid-way (codec/muxer/render error). The owner should
+     * stop() the encoder: the file is lost either way, and stop() aborts the row.
+     */
+    @Volatile var onError: (Throwable) -> Unit = {}
+
+    /** Test seam: makes every muxer write throw, like a full disk or a broken muxer. */
+    @Volatile internal var failWritesForTest = false
+
     init {
         val name = checkNotNull(avcEncoderFor(config)) { "no H.264 encoder for $config" }
         video = MediaCodec.createByCodecName(name)
@@ -226,7 +235,8 @@ class VideoEncoder(val config: EncoderConfig, private val pending: MediaSaver.Pe
     /** Marks the recording failed: stop() then aborts the row and throws. Any thread (e.g. the render thread's GL errors). */
     fun fail(t: Throwable) {
         Log.e(TAG, "encoder error", t)
-        if (error == null) error = t
+        val first = synchronized(this) { (error == null).also { if (it) error = t } }
+        if (first && !stopping) onError(t)
     }
 
     private fun feedAudio() {
@@ -247,28 +257,41 @@ class VideoEncoder(val config: EncoderConfig, private val pending: MediaSaver.Pe
         samples += n / 2
     }
 
-    /** Drains codec output into the muxer until end of stream; errors end the loop. */
+    /**
+     * Drains codec output into the muxer until end of stream. Audio errors end the loop. A video error fails the
+     * recording but the loop keeps releasing output buffers (no more writes) until EOS or abandon: an undrained codec
+     * would block the render thread's swaps into its input surface (frozen preview, ANR in stopRecording).
+     */
     private fun drainLoop(codec: MediaCodec, isVideo: Boolean, feed: (() -> Unit)? = null) {
         val info = MediaCodec.BufferInfo()
-        try {
-            while (!abandoned) {
+        var failed = false
+        while (!abandoned) {
+            try {
                 feed?.invoke()
                 val i = codec.dequeueOutputBuffer(info, 10_000)
-                if (i == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) addTrack(isVideo, codec.outputFormat)
+                if (i == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED && !failed) addTrack(isVideo, codec.outputFormat)
                 if (i < 0) continue
-                if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && info.size > 0) write(isVideo, codec.getOutputBuffer(i)!!, info)
-                codec.releaseOutputBuffer(i, false)
+                try {
+                    if (!failed && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && info.size > 0) write(isVideo, codec.getOutputBuffer(i)!!, info)
+                } finally {
+                    codec.releaseOutputBuffer(i, false)
+                }
                 if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                     if (isVideo) videoEos = true
                     return
                 }
+            } catch (t: Throwable) {
+                if (abandoned) return
+                if (isVideo) {
+                    if (!failed) fail(t) else Thread.sleep(10) // codec itself broken: don't spin until stop() abandons us
+                    failed = true
+                    continue
+                }
+                // Audio failure: keep the video, end the audio track here (or go video-only if it never started).
+                Log.e(TAG, "audio failed; continuing without it", t)
+                synchronized(muxLock) { if (audioTrack < 0) { expectAudio = false; maybeStartMuxer() } }
+                return
             }
-        } catch (t: Throwable) {
-            if (abandoned) return
-            if (isVideo) return fail(t)
-            // Audio failure: keep the video, end the audio track here (or go video-only if it never started).
-            Log.e(TAG, "audio failed; continuing without it", t)
-            synchronized(muxLock) { if (audioTrack < 0) { expectAudio = false; maybeStartMuxer() } }
         }
     }
 
@@ -287,6 +310,7 @@ class VideoEncoder(val config: EncoderConfig, private val pending: MediaSaver.Pe
     }
 
     private fun write(isVideo: Boolean, buf: ByteBuffer, info: MediaCodec.BufferInfo) = synchronized(muxLock) {
+        check(!failWritesForTest) { "injected muxer write failure" }
         buf.position(info.offset).limit(info.offset + info.size)
         if (muxerStarted) return@synchronized muxer!!.writeSampleData(if (isVideo) videoTrack else audioTrack, buf, info)
         if (!isVideo && !expectAudio) return@synchronized

@@ -6,6 +6,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.SystemClock
 import android.opengl.GLES30
 import android.provider.MediaStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -21,6 +22,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /** Synthetic GL source -> VideoEncoder -> MP4 in MediaStore; checks tracks, size, duration and frame content. */
 @RunWith(AndroidJUnit4::class)
@@ -56,6 +60,44 @@ class VideoEncoderTest {
         egl.releaseSurface(surf)
         egl.release()
         assertEquals("encoder eglSwapBuffers failed", thrown?.message)
+        val args = android.os.Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE) }
+        resolver.query(pending.uri, null, args, null)!!.use { assertEquals(0, it.count) }
+    }
+
+    /**
+     * A muxer write failing mid-recording: the encoder reports it via onError, keeps draining so the render thread's
+     * swaps into its input surface never block (preview freeze -> ANR), and stop() returns promptly, aborting the row.
+     */
+    @Test fun muxerFailureKeepsDrainingAndReportsError() {
+        val pending = MediaSaver(resolver).beginVideo()
+        val enc = VideoEncoder(supported.first { it.surfaceInput }, pending, withAudio = false)
+        val reported = CountDownLatch(1)
+        enc.onError = { reported.countDown() }
+        enc.failWritesForTest = true
+        var swapped = 0
+        val feeder = thread {
+            val egl = EglCore()
+            val surf = egl.createWindowSurface(enc.inputSurface()!!)
+            egl.makeCurrent(surf)
+            enc.start()
+            repeat(90) { i -> // ~3 s at 30 fps: far more than the codec's output buffers
+                GLES30.glClearColor(i / 90f, 0f, 0f, 1f)
+                GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+                egl.setPresentationTime(surf, enc.framePtsNs((i + 1) * 33_333_333L))
+                egl.swap(surf)
+                swapped++
+                Thread.sleep(33)
+            }
+            egl.releaseSurface(surf)
+            egl.release()
+        }
+        feeder.join(15_000)
+        assertTrue("encoder input blocked after $swapped frames", !feeder.isAlive)
+        assertTrue("no error reported", reported.await(1, TimeUnit.SECONDS))
+        val t0 = SystemClock.elapsedRealtime()
+        val thrown = runCatching { runBlocking { enc.stop() } }.exceptionOrNull()
+        assertTrue("stop took ${SystemClock.elapsedRealtime() - t0} ms", SystemClock.elapsedRealtime() - t0 < 2000)
+        assertEquals("injected muxer write failure", thrown?.message)
         val args = android.os.Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE) }
         resolver.query(pending.uri, null, args, null)!!.use { assertEquals(0, it.count) }
     }
