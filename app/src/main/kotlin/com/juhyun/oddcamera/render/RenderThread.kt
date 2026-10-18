@@ -86,8 +86,6 @@ class RenderThread : HandlerThread("RenderThread") {
     private val liveStreams = ArrayList<CameraStream>()
     private var quitting = false
     private val governor = PerfGovernor()
-    /** Debug knob (`setprop debug.oddcamera.tier N`, polled once a second); -1 = governor decides. */
-    private var forcedTier = -1
     private var perfStartNs = 0L
     private var perfFrames = 0
     private var perfSumMs = 0f
@@ -280,20 +278,11 @@ class RenderThread : HandlerThread("RenderThread") {
         perfSumMs += ms
         if (perfStartNs == 0L) perfStartNs = t0
         if (t1 - perfStartNs >= 1_000_000_000L) {
-            forcedTier = debugTierProperty()
             Log.i(PERF_TAG, "fps=%.1f avgMs=%.1f tier=%d%s".format(perfFrames * 1e9f / (t1 - perfStartNs),
-                perfSumMs / perfFrames, activeTierIndex(), if (isRecording) " rec" else ""))
+                perfSumMs / perfFrames, governor.index, if (isRecording) " rec" else ""))
             perfStartNs = t1; perfFrames = 0; perfSumMs = 0f
         }
     }
-
-    private fun activeTierIndex() = if (forcedTier in PerfGovernor.DEFAULT_TIERS.indices) forcedTier else governor.index
-
-    // ponytail: hidden-API reflection; returns -1 if blocked. Replace with a BuildConfig-gated hook if it breaks.
-    private fun debugTierProperty(): Int = try {
-        Class.forName("android.os.SystemProperties").getMethod("getInt", String::class.java, Int::class.javaPrimitiveType)
-            .invoke(null, "debug.oddcamera.tier", -1) as Int
-    } catch (_: Throwable) { -1 }
 
     private fun onFrame(s: CameraStream) {
         if (egl == null) return
@@ -306,7 +295,7 @@ class RenderThread : HandlerThread("RenderThread") {
         val cw = if (swap) s.crop.height() else s.crop.width()
         val ch = if (swap) s.crop.width() else s.crop.height()
         if (cw <= 0 || ch <= 0) return
-        val tier = PerfGovernor.DEFAULT_TIERS[activeTierIndex()]
+        val tier = PerfGovernor.DEFAULT_TIERS[governor.index]
         val fw = scaled(cw, tier.processScale)
         val fh = scaled(ch, tier.processScale)
         val f = frame?.takeIf { it.width == fw && it.height == fh } ?: run {
