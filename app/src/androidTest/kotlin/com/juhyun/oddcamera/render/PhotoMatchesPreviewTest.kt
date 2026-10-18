@@ -12,6 +12,7 @@ import com.juhyun.oddcamera.filter.ParamValues
 import com.juhyun.oddcamera.filter.ascii.AsciiFilter
 import com.juhyun.oddcamera.filter.boxes.LightBoxesAnalysis
 import com.juhyun.oddcamera.filter.boxes.LightBoxesFilter
+import com.juhyun.oddcamera.filter.kaleidoscope.KaleidoscopeFilter
 import com.juhyun.oddcamera.gl.EglCore
 import com.juhyun.oddcamera.gl.GlUtil
 import org.junit.After
@@ -91,8 +92,8 @@ class PhotoMatchesPreviewTest {
         val rot = Matrix().apply { postRotate(rotationDeg.toFloat()) }
         val expected = when {
             rotationDeg == 0 -> p.image
-            // Glyphs stay upright in the output: expect the preview of the device-rotated scene (same analysis).
-            filter === AsciiFilter -> preview(filter, r, previewSrc.transformed(rot), p.params, p.analysis).image
+            // Glyphs stay upright / shifts go right-down in the output: expect the preview of the device-rotated scene (same analysis).
+            filter === AsciiFilter || filter === KaleidoscopeFilter -> preview(filter, r, previewSrc.transformed(rot), p.params, p.analysis).image
             else -> p.image.transformed(rot)
         }
         r.release()
@@ -108,6 +109,9 @@ class PhotoMatchesPreviewTest {
     @Test fun lightBoxesRotated90() { compare(LightBoxesFilter, false, 90) }
     @Test fun asciiRotated90() { compare(AsciiFilter, false, 90) }
     @Test fun lightBoxesMirroredRotated270() { compare(LightBoxesFilter, true, 270) }
+    @Test fun kaleidoscope() { compare(KaleidoscopeFilter, false, 0) }
+    @Test fun kaleidoscopeRotated90() { compare(KaleidoscopeFilter, false, 90) }
+    @Test fun kaleidoscopeMirroredRotated270() { compare(KaleidoscopeFilter, true, 270) }
 
     /** R13: a still exposed darker than the preview (×0.7) still gets the preview's ASCII coverage. */
     @Test fun asciiCoverageFollowsTheStillNotTheAbsoluteThreshold() {
