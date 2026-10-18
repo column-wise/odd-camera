@@ -406,7 +406,8 @@ class RenderThread : HandlerThread("RenderThread") {
             previous = null
         }
         val params = sel.params.snapshot()
-        val luma = analysisReader.read(f.tex, f.width, f.height, analysisWidth)
+        val luma = analysisReader.read(f.tex, f.width, f.height, analysisWidth,
+            if (sel.filter.needsRgba(params)) SEG_WIDTH else 0)
         val analysis = sel.filter.analyze(luma, params, previous)
         previous = analysis
 
@@ -461,6 +462,8 @@ class RenderThread : HandlerThread("RenderThread") {
         private fun scaled(v: Int, scale: Float) = maxOf(2, Math.round(v * scale / 2f) * 2)
         /** Full analysis width (ruling R7: ≤160); the governor lowers the preview's. Photo analysis always uses this. */
         const val ANALYSIS_WIDTH = 160
+        /** RGBA readback width for filters that need it (person segmentation); fixed across perf tiers. */
+        const val SEG_WIDTH = 256
 
         private const val VS = """#version 300 es
 in vec2 aPos;

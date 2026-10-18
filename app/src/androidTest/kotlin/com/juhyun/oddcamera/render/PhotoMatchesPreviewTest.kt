@@ -73,7 +73,7 @@ class PhotoMatchesPreviewTest {
     private fun mad(a: Bitmap, b: Bitmap) = downscaledMad(a.pixels(), a.width, a.height, b.pixels(), b.width, b.height)
 
     private fun params(filter: Filter) = ParamValues(filter.params).apply {
-        if (filter === AsciiFilter) set("topPercent", 20f) // glyphs over a good part of the frame
+        if (filter === AsciiFilter) { set("region", "bright"); set("topPercent", 20f) } // glyphs over a good part
     }
 
     /** Compares preview vs 4× photo for one filter/mirror/rotation; returns the MAD. */
@@ -120,9 +120,9 @@ class PhotoMatchesPreviewTest {
         val shot = photo.render(Bitmap.createScaledBitmap(darker, W * 4, H * 4, false),
             CaptureSnapshot(AsciiFilter, p.params, p.analysis, false, 0), r)
         r.release()
-        // Coverage = share of glyph-background pixels (replaced cells).
+        // Coverage = share of replaced-cell pixels (white or red glyph; this scene's gray background stays < 110).
         fun coverage(b: Bitmap) = b.pixels().count { c ->
-            Math.abs(Color.red(c) - 0xF4) <= 3 && Math.abs(Color.green(c) - 0xF0) <= 3 && Math.abs(Color.blue(c) - 0xFF) <= 3
+            Color.red(c) > 150
         }.toDouble() / (b.width * b.height)
         val cp = coverage(p.image); val cs = coverage(shot)
         assertTrue("preview coverage $cp too small for a meaningful check", cp > 0.1)

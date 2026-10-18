@@ -43,7 +43,8 @@ class PhotoRenderer {
             GLES30.glDeleteTextures(1, intArrayOf(tex), 0)
 
             val rotated = FrameRotator.rotate(snapshot.analysis, rot)
-            val still = reader.read(a.tex, w, h, RenderThread.ANALYSIS_WIDTH)
+            val still = reader.read(a.tex, w, h, RenderThread.ANALYSIS_WIDTH,
+                if (snapshot.filter.needsRgba(snapshot.params)) RenderThread.SEG_WIDTH else 0)
             val analysis = snapshot.filter.captureAnalysis(still, snapshot.params, rotated)
             FilterPass.render(renderer, a.tex, b.id, w, h, snapshot.params, analysis)
 

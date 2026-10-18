@@ -33,6 +33,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.mlkit.segmentation.selfie)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)

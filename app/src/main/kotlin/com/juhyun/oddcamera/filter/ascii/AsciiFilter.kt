@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.opengl.GLES30
 import android.opengl.GLUtils
+import android.os.SystemClock
 import com.juhyun.oddcamera.filter.BoolParam
 import com.juhyun.oddcamera.filter.ChoiceParam
 import com.juhyun.oddcamera.filter.Filter
@@ -17,12 +18,14 @@ import com.juhyun.oddcamera.filter.FrameAnalysis
 import com.juhyun.oddcamera.filter.IntParam
 import com.juhyun.oddcamera.filter.LumaFrame
 import com.juhyun.oddcamera.filter.ParamValues
+import com.juhyun.oddcamera.filter.RotatableAnalysis
 import com.juhyun.oddcamera.filter.TextParam
 import com.juhyun.oddcamera.filter.percentileThreshold
 import com.juhyun.oddcamera.gl.GlProgram
 import com.juhyun.oddcamera.gl.GlUtil
+import java.nio.ByteBuffer
 
-/** Dark→bright ramps; a ramp's first glyph is drawn for the dimmest cells. */
+/** Dark→bright ramps; a ramp's first glyph is drawn for the dimmest cells. Every ramp starts with a blank. */
 private val PRESETS = mapOf(
     "classic" to " .:-=+*#%@",
     "dots" to " ·•●",
@@ -30,16 +33,20 @@ private val PRESETS = mapOf(
     "binary" to " 01",
 )
 
+/** A glyph set rather than a ramp: ink-sorted like custom so full-frame still ramps. */
+private const val SYMBOLS = "#%@=+*$&"
+
 private fun String.codePointStrings(): List<String> =
     codePoints().toArray().map { String(Character.toChars(it)) }
 
 /**
- * Glyph ramp for the chosen set. Custom: distinct non-blank code points sorted by [inkOf] ascending,
- * after a leading space; nothing usable → classic.
+ * Glyph ramp for the chosen set. Symbols/custom: distinct non-blank code points sorted by [inkOf] ascending,
+ * after a leading space; nothing usable → classic. Region modes draw random picks from ramp[1..] (no blanks).
  */
 fun resolveRamp(glyphSet: String, custom: String, inkOf: (String) -> Float): List<String> {
-    if (glyphSet == "custom") {
-        val glyphs = custom.codePoints().toArray()
+    val set = when (glyphSet) { "symbols" -> SYMBOLS; "custom" -> custom; else -> null }
+    if (set != null) {
+        val glyphs = set.codePoints().toArray()
             .filter { !Character.isWhitespace(it) && !Character.isISOControl(it) }
             .distinct().map { String(Character.toChars(it)) }
         if (glyphs.isNotEmpty()) return listOf(" ") + glyphs.sortedBy(inkOf)
@@ -54,37 +61,87 @@ fun resolveRamp(glyphSet: String, custom: String, inkOf: (String) -> Float): Lis
 fun glyphIndex(luma: Int, threshold: Int, rampSize: Int): Int =
     ((luma - threshold - 1) * rampSize / maxOf(1, 255 - threshold)).coerceIn(0, maxOf(0, rampSize - 1))
 
-/** Grid of glyph cells over the bright parts (mask mode) or the whole frame (full-frame mode). */
+/** glyphEpoch: re-roll clock ([glyphEpoch]) of the analyzed frame, so captures draw the preview's glyphs. */
+class AsciiAnalysis(override val threshold: Int, val mask: Mask?, val glyphEpoch: Int) : RotatableAnalysis {
+    override fun rotated(deg: Int) = AsciiAnalysis(threshold, mask?.let { rotateMask(it, deg) }, glyphEpoch)
+}
+
+fun glyphEpoch(timeMs: Long): Int = (timeMs / 250).toInt()
+
+private const val REROLL_EPOCHS = 10
+
+private fun mix32(v: Int): Int {
+    var x = v
+    x = x xor (x ushr 16); x *= 0x7feb352d
+    x = x xor (x ushr 15); x *= 0x846ca68b.toInt()
+    return x xor (x ushr 16)
+}
+
+/**
+ * Index into a glyph set of setSize for a cell. Each cell re-rolls once every [REROLL_EPOCHS] epochs at its own
+ * phase, so ~1/10 of cells re-roll per epoch (a few times per second overall). Mirrored bit-for-bit in [AsciiFilter.FS].
+ */
+fun glyphFor(cellX: Int, cellY: Int, epoch: Int, setSize: Int): Int {
+    val h = mix32((cellX * 73856093) xor (cellY * 19349663))
+    val gen = (epoch + (h ushr 8) % REROLL_EPOCHS) / REROLL_EPOCHS
+    return (mix32(h xor mix32(gen)) ushr 8) % setSize
+}
+
+/**
+ * Region mode: cells over people (ML Kit segmentation) or over the bright parts become red random glyphs on white,
+ * the rest goes gray with a soft white glow at the person edge. Full-frame mode: brightness-ramped glyphs everywhere.
+ */
 object AsciiFilter : Filter {
     override val id = "ascii"
     override val title = "아스키"
     override val params: List<FilterParam> = listOf(
+        ChoiceParam("region", "영역 기준", listOf("person" to "사람", "bright" to "밝은 부분"), "person"),
         FloatParam("topPercent", "밝은 부분 상위 %", 1f, 60f, 25f, 1f),
         IntParam("columns", "가로 문자 수", 30, 160, 60),
         BoolParam("fullFrame", "전체 화면", false),
         ChoiceParam("glyphSet", "문자 종류", listOf(
-            "classic" to "클래식", "dots" to "점", "blocks" to "블록", "binary" to "이진",
-            "custom" to "직접 입력"), "classic"),
+            "symbols" to "기호", "classic" to "클래식", "dots" to "점", "blocks" to "블록", "binary" to "이진",
+            "custom" to "직접 입력"), "symbols"),
         TextParam("customGlyphs", "직접 입력 문자", "", maxCodePoints = 16),
+        BoolParam("grayBackground", "배경 흑백", true),
     )
 
+    /** GL thread only (analyze / captureAnalysis / renderer release). Created lazily, dropped on renderer release. */
+    private var segmenter: PersonSegmenter? = null
+    private fun segmenter() = segmenter ?: PersonSegmenter().also { segmenter = it }
+
+    override fun needsRgba(params: ParamValues) = params.string("region") == "person" && !params.bool("fullFrame")
+
     override fun analyze(frame: LumaFrame, params: ParamValues, previous: FrameAnalysis?): FrameAnalysis {
-        val t = percentileThreshold(frame.histogram, params.float("topPercent"))
-        return object : FrameAnalysis { override val threshold = t }
+        val epoch = glyphEpoch(SystemClock.uptimeMillis())
+        if (!needsRgba(params)) return AsciiAnalysis(percentileThreshold(frame.histogram, params.float("topPercent")), null, epoch)
+        val seg = segmenter()
+        frame.rgba?.let { seg.submit(it, frame.rgbaWidth, frame.rgbaHeight) }
+        return AsciiAnalysis(256, seg.latest, epoch)
     }
 
     /**
-     * Same relative threshold on the still's own histogram -> same coverage as the preview despite exposure (R13).
-     * The preview's on/off decision (contrast gate, threshold 256) wins: a still that crosses the gate differently
-     * keeps the snapshot.
+     * Person mode: segment the still itself (exposure/resolution-correct mask); failure keeps the snapshot's mask.
+     * Bright mode (R13): same relative threshold on the still's own histogram -> same coverage as the preview despite
+     * exposure; the preview's on/off decision (contrast gate, threshold 256) wins. The glyph epoch always stays.
      */
-    override fun captureAnalysis(still: LumaFrame, params: ParamValues, snapshot: FrameAnalysis): FrameAnalysis =
-        if (snapshot.threshold >= 256) snapshot
-        else analyze(still, params, null).takeIf { it.threshold < 256 } ?: snapshot
+    override fun captureAnalysis(still: LumaFrame, params: ParamValues, snapshot: FrameAnalysis): FrameAnalysis {
+        val s = snapshot as? AsciiAnalysis ?: return snapshot
+        if (needsRgba(params)) {
+            val rgba = still.rgba ?: return s
+            val m = segmenter().segmentBlocking(rgba, still.rgbaWidth, still.rgbaHeight) ?: return s
+            return AsciiAnalysis(s.threshold, m, s.glyphEpoch)
+        }
+        if (s.threshold >= 256) return s
+        val t = percentileThreshold(still.histogram, params.float("topPercent"))
+        return if (t < 256) AsciiAnalysis(t, s.mask, s.glyphEpoch) else s
+    }
 
     override fun createRenderer(): FilterRenderer = object : FilterRenderer {
         private lateinit var program: GlProgram
         private var atlas = 0
+        private var maskTex = 0
+        private var uploaded: Mask? = null
         private var ramp: List<String> = emptyList()
         private val inkCache = HashMap<String, Float>()
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -98,6 +155,18 @@ object AsciiFilter : Filter {
             program = GlProgram(GlUtil.QUAD_VS, FS)
             atlas = GlUtil.createTexture(GLES30.GL_TEXTURE_2D)
             GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR_MIPMAP_LINEAR)
+            maskTex = GlUtil.createTexture(GLES30.GL_TEXTURE_2D)
+        }
+
+        /** Mask as an R8 texture, t = 0 = frame top; re-uploaded only when the Mask instance changes. */
+        private fun uploadMask(m: Mask) {
+            if (m === uploaded) return
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTex)
+            GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 1)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, m.w, m.h, 0, GLES30.GL_RED,
+                GLES30.GL_UNSIGNED_BYTE, ByteBuffer.wrap(m.data))
+            GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 4)
+            uploaded = m
         }
 
         private fun drawGlyph(canvas: Canvas, g: String, cx: Float) {
@@ -128,6 +197,16 @@ object AsciiFilter : Filter {
         override fun draw(srcTex: Int, w: Int, h: Int, params: ParamValues, analysis: FrameAnalysis) {
             val r = resolveRamp(params.string("glyphSet"), params.string("customGlyphs"), ::inkOf)
             if (r != ramp) rebuildAtlas(r)
+            val a = analysis as? AsciiAnalysis
+            val mask = a?.mask
+            val mode = when {
+                params.bool("fullFrame") -> 0
+                params.string("region") == "person" -> 2
+                else -> 1
+            }
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+            if (mask != null) uploadMask(mask)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTex)
             program.use()
             GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, atlas)
@@ -135,17 +214,24 @@ object AsciiFilter : Filter {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, srcTex)
             GLES30.glUniform1i(program.uniform("uTex"), 0)
             GLES30.glUniform1i(program.uniform("uAtlas"), 1)
+            GLES30.glUniform1i(program.uniform("uMask"), 2)
             GLES30.glUniform2f(program.uniform("uSize"), w.toFloat(), h.toFloat())
             GLES30.glUniform1f(program.uniform("uCell"), w.toFloat() / params.int("columns"))
             GLES30.glUniform1i(program.uniform("uThreshold"), analysis.threshold)
             GLES30.glUniform1i(program.uniform("uRamp"), ramp.size)
-            GLES30.glUniform1i(program.uniform("uFull"), if (params.bool("fullFrame")) 1 else 0)
+            GLES30.glUniform1i(program.uniform("uMode"), mode)
+            GLES30.glUniform1i(program.uniform("uHasMask"), if (mask != null) 1 else 0)
+            GLES30.glUniform1i(program.uniform("uGray"), if (params.bool("grayBackground")) 1 else 0)
+            GLES30.glUniform1i(program.uniform("uEpoch"), a?.glyphEpoch ?: 0)
             GlUtil.drawQuad(program)
         }
 
         override fun release() {
             program.release()
-            GLES30.glDeleteTextures(1, intArrayOf(atlas), 0)
+            GLES30.glDeleteTextures(2, intArrayOf(atlas, maskTex), 0)
+            uploaded = null
+            segmenter?.close()
+            segmenter = null
         }
     }
 
@@ -153,20 +239,38 @@ object AsciiFilter : Filter {
     private const val CELL = 64
 
     // Cells are square, w / columns px, counted from the frame's top-left (GL y is up, so flip).
-    // Cell luma = average of 4 taps inside the cell; glyph index = glyphIndex() above.
+    // Cell luma = average of 4 taps inside the cell. uMode 0 = full frame (glyphIndex() above with threshold -1),
+    // 1 = bright cells (luma > threshold), 2 = person cells (mask at the cell centre > 0.5).
+    // Region cells: white + red glyph ramp[1 + glyphFor()]. Outside: gray (luma × 0.8) or src, blended to white by
+    // smoothstep(0.15, 0.5, mask) for the edge glow. uMask t = 0 is the frame top.
     // textureGrad keeps the atlas mip level smooth across cell edges (fract() would spike it).
     private const val FS = """#version 300 es
 precision highp float;
 precision highp int;
 uniform sampler2D uTex;
 uniform sampler2D uAtlas;
+uniform sampler2D uMask;
 uniform vec2 uSize;
 uniform float uCell;
 uniform int uThreshold;
 uniform int uRamp;
-uniform bool uFull;
+uniform int uMode;
+uniform bool uHasMask;
+uniform bool uGray;
+uniform int uEpoch;
 in vec2 vUv;
 out vec4 outColor;
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+uint mix32(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+float glyph(int idx, vec2 local) {
+    float n = float(uRamp);
+    return textureGrad(uAtlas, vec2((float(idx) + local.x) / n, local.y),
+                       vec2(1.0 / (n * uCell), 0.0), vec2(0.0, 1.0 / uCell)).a;
+}
 void main() {
     vec2 g = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y) / uCell;
     vec2 cell = floor(g);
@@ -177,18 +281,25 @@ void main() {
         c += texture(uTex, vec2(q.x / uSize.x, 1.0 - q.y / uSize.y)).rgb;
     }
     c *= 0.25;
-    int l = int(dot(c, vec3(0.299, 0.587, 0.114)) * 255.0 + 0.5);
-    int t = uFull ? -1 : uThreshold;
-    if (l <= t) { outColor = texture(uTex, vUv); return; }
-    int idx = clamp((l - t - 1) * uRamp / max(1, 255 - t), 0, uRamp - 1);
-    float n = float(uRamp);
-    float a = textureGrad(uAtlas, vec2((float(idx) + local.x) / n, local.y),
-                          vec2(1.0 / (n * uCell), 0.0), vec2(0.0, 1.0 / uCell)).a;
-    if (uFull) {
-        outColor = vec4(c * a, 1.0);
-    } else {
-        vec3 ink = (int(cell.x) + int(cell.y)) % 3 == 0 ? vec3(0.8, 0.2, 0.2) : vec3(85.0 / 255.0);
-        outColor = vec4(mix(vec3(244.0, 240.0, 255.0) / 255.0, ink, a), 1.0);
+    int l = int(dot(c, LUMA) * 255.0 + 0.5);
+    if (uMode == 0) {
+        int idx = clamp(l * uRamp / 256, 0, uRamp - 1);
+        outColor = vec4(c * glyph(idx, local), 1.0);
+        return;
     }
+    bool inside = uMode == 2
+        ? uHasMask && texture(uMask, (cell + 0.5) * uCell / uSize).r > 0.5
+        : l > uThreshold;
+    if (inside) {
+        uint h = mix32((uint(int(cell.x)) * 73856093u) ^ (uint(int(cell.y)) * 19349663u));
+        uint gen = (uint(uEpoch) + (h >> 8) % 10u) / 10u;
+        int idx = 1 + int((mix32(h ^ mix32(gen)) >> 8) % uint(uRamp - 1));
+        outColor = vec4(mix(vec3(1.0), vec3(208.0, 20.0, 30.0) / 255.0, glyph(idx, local)), 1.0);
+        return;
+    }
+    vec3 src = texture(uTex, vUv).rgb;
+    vec3 base = uGray ? vec3(dot(src, LUMA) * 0.8) : src;
+    float m = uHasMask ? texture(uMask, vec2(vUv.x, 1.0 - vUv.y)).r : 0.0;
+    outColor = vec4(mix(base, vec3(1.0), smoothstep(0.15, 0.5, m)), 1.0);
 }"""
 }
